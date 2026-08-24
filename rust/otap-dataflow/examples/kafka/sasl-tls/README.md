@@ -64,6 +64,18 @@ producer emits a bounded batch (20 signals, `pre_generated`) and stops; the
 receivers keep running so you can inspect the groups. Use a second terminal for
 the checks below.
 
+## Web UI (Redpanda Console)
+
+The stack includes a [Redpanda Console](https://github.com/redpanda-data/console)
+container that connects to the broker **over SASL/TLS** (the static PLAIN user
+`plain`, trusting the local CA) - so the UI itself exercises the authenticated
+path. It starts automatically with the broker; open <http://localhost:8082>.
+
+Under **Topics** you can inspect `otlp-logs-plain`, `otlp-logs-scram-256`, and
+`otlp-logs-scram-512` and their messages; under **Consumer Groups** each
+mechanism's group shows zero lag once the engine drains it. That the console can
+list the cluster at all is itself proof the SASL/TLS handshake succeeds.
+
 ## Validation
 
 ### 1. The broker accepts each mechanism over TLS (optional preflight)

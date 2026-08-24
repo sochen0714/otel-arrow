@@ -35,3 +35,16 @@ services:
       KAFKA_TOPIC: otlp-logs
       KAFKA_PARTITIONS: "3"
     entrypoint: ["/bin/bash", "/scripts/initialize-kafka.sh"]
+
+  # Web UI for browsing topics, messages, and consumer groups (with per-partition
+  # lag). Plaintext broker, so no auth/TLS client config is needed. Reachable at
+  # http://localhost:8082 (host 8082 avoids the engine admin ports 8080/8081).
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.16
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: kafka:9092
+    ports:
+      - "8082:8080"

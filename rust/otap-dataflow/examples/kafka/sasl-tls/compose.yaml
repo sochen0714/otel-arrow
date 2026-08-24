@@ -74,3 +74,26 @@ services:
     volumes:
       - ./scripts:/scripts:ro
     entrypoint: ["/bin/bash", "/scripts/initialize-kafka.sh"]
+
+  # Web UI for browsing topics, messages, and consumer groups (with per-partition
+  # lag). It connects to the broker over SASL/TLS as the static PLAIN user and
+  # trusts the local CA, so the UI itself exercises the authenticated path.
+  # Reachable at http://localhost:8082 (host 8082 avoids the engine admin port
+  # 8080). Credentials are local-development only.
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.16
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./certs:/etc/kafka/certs:ro
+    environment:
+      KAFKA_BROKERS: kafka:9093
+      KAFKA_TLS_ENABLED: "true"
+      KAFKA_TLS_CAFILEPATH: /etc/kafka/certs/ca.crt
+      KAFKA_SASL_ENABLED: "true"
+      KAFKA_SASL_MECHANISM: PLAIN
+      KAFKA_SASL_USERNAME: plain
+      KAFKA_SASL_PASSWORD: plain-secret
+    ports:
+      - "8082:8080"

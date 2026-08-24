@@ -22,6 +22,10 @@ docker compose -f compose.yaml -f compose.dataflow.yaml up --build
 Both features run entirely in containers; no local Rust toolchain or `cargo`
 invocation is required.
 
+Each stack also includes a [Redpanda Console](https://github.com/redpanda-data/console)
+web UI (on <http://localhost:8082>) for browsing topics, messages, and consumer
+groups from a browser. See each feature's README for details.
+
 ## Feature validation
 
 | Feature                | Folder                                 | What it validates                                                                                   | Status    |

@@ -55,6 +55,17 @@ The producer sends a bounded batch (`KAFKA_MAX_SIGNAL_COUNT`, default 300) and
 exits; the consumers keep running so you can inspect the group. Use a second
 terminal for the checks below.
 
+## Web UI (Redpanda Console)
+
+The stack includes a [Redpanda Console](https://github.com/redpanda-data/console)
+container for browsing topics, messages, and consumer groups (with per-partition
+lag) from a browser. It starts automatically with the broker; open
+<http://localhost:8082>.
+
+Under **Consumer Groups**, watch `otap-consumer-group` split its 3 partitions
+across `consumer-a`/`consumer-b` and drain to zero lag - the same evidence as the
+CLI checks below. Under **Topics** you can inspect `otlp-logs` and its messages.
+
 ## Validation
 
 ### 1. Partition assignment is split across instances
