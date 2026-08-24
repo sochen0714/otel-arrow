@@ -1,0 +1,89 @@
+# Overlay that adds the OTAP dataflow engine containers on top of compose.yaml.
+#
+#   docker compose -f compose.yaml -f compose.dataflow.yaml up --build
+#
+# Three df_engine containers share one image (built once via the YAML anchor
+# below): a single producer plus two consumer instances (consumer-a, consumer-b)
+# that join the same Kafka consumer group and split the topic's partitions.
+#
+# Build contexts (relative to this file at
+# rust/otap-dataflow/examples/kafka/consumer-groups):
+#   context   ../../..          -> rust/otap-dataflow  (the crate sources)
+#   otel-arrow ../../../../..   -> repo root           (proto + experimental)
+#
+# The Dockerfile is shared by every Kafka example and lives one level up at
+# examples/kafka/Dockerfile.dataflow.
+
+x-dataflow-build: &dataflow-build
+  context: ../../..
+  dockerfile: examples/kafka/Dockerfile.dataflow
+  additional_contexts:
+    otel-arrow: ../../../../..
+  args:
+    TARGETPLATFORM: linux/amd64
+    FEATURES: kafka-receiver,kafka-exporter
+
+services:
+  producer:
+    build: *dataflow-build
+    image: otap-kafka-consumer-groups:latest
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: otlp-logs
+      KAFKA_CLIENT_ID: otap-producer
+      # Bounded run so the group lag deterministically drains to zero. Set to
+      # "null" for a continuous stream.
+      KAFKA_MAX_SIGNAL_COUNT: ${KAFKA_MAX_SIGNAL_COUNT:-300}
+      KAFKA_SIGNALS_PER_SECOND: ${KAFKA_SIGNALS_PER_SECOND:-50}
+    volumes:
+      - ./producer.yaml:/home/nonroot/producer.yaml:ro
+    command: ["--config", "file:/home/nonroot/producer.yaml", "--num-cores", "1"]
+
+  consumer-a:
+    build: *dataflow-build
+    image: otap-kafka-consumer-groups:latest
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: otlp-logs
+      KAFKA_GROUP_ID: otap-consumer-group
+      KAFKA_CLIENT_ID: consumer-a
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./consumer.yaml:/home/nonroot/consumer.yaml:ro
+    command:
+      - "--config"
+      - "file:/home/nonroot/consumer.yaml"
+      - "--num-cores"
+      - "1"
+      - "--http-admin-bind"
+      - "0.0.0.0:8080"
+
+  consumer-b:
+    build: *dataflow-build
+    image: otap-kafka-consumer-groups:latest
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: otlp-logs
+      KAFKA_GROUP_ID: otap-consumer-group
+      KAFKA_CLIENT_ID: consumer-b
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./consumer.yaml:/home/nonroot/consumer.yaml:ro
+    command:
+      - "--config"
+      - "file:/home/nonroot/consumer.yaml"
+      - "--num-cores"
+      - "1"
+      - "--http-admin-bind"
+      - "0.0.0.0:8080"

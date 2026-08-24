@@ -1,0 +1,55 @@
+# Producer pipeline: synthetic OTLP logs -> Kafka.
+#
+# Feeds the `otlp-logs` topic that the consumer group drains. Values are
+# environment-parameterized so the same file runs both in Docker Compose and
+# natively via `cargo run` (defaults target a localhost broker).
+version: otel_dataflow/v1
+
+engine:
+  telemetry:
+    logs:
+      level: "info"
+
+groups:
+  default:
+    pipelines:
+      main:
+        policies:
+          channel_capacity:
+            control:
+              node: 100
+              pipeline: 100
+            pdata: 128
+
+        nodes:
+          traffic-generator:
+            type: "urn:otel:receiver:traffic_generator"
+            config:
+              data_source: synthetic
+              generation_strategy: fresh
+              traffic_config:
+                # Bounded by default so the run terminates and consumer-group
+                # lag deterministically drains to zero. Set KAFKA_MAX_SIGNAL_COUNT
+                # to "null" for an unbounded stream.
+                signals_per_second: ${env:KAFKA_SIGNALS_PER_SECOND:-50}
+                max_signal_count: ${env:KAFKA_MAX_SIGNAL_COUNT:-300}
+                metric_weight: 0
+                trace_weight: 0
+                log_weight: 1
+
+          kafka-exporter:
+            type: "urn:otel:exporter:kafka"
+            config:
+              brokers: ${env:KAFKA_BROKERS:-localhost:9092}
+              client_id: ${env:KAFKA_CLIENT_ID:-otap-producer}
+              # The topic is pre-created with a fixed partition count by
+              # scripts/initialize-kafka.sh; refuse to auto-create so the
+              # partition count backing the demo is authoritative.
+              allow_auto_create_topics: false
+              logs:
+                topic: ${env:KAFKA_TOPIC:-otlp-logs}
+                encoding: otlp_proto
+
+        connections:
+          - from: traffic-generator
+            to: kafka-exporter

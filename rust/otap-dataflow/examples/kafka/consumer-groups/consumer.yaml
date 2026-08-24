@@ -1,0 +1,64 @@
+# Consumer pipeline: Kafka consumer-group member -> noop sink.
+#
+# Every consumer instance runs this identical config and joins the same
+# consumer group (KAFKA_GROUP_ID). The broker coordinator distributes the
+# topic's partitions across the live members and re-splits them whenever a
+# member joins or leaves. Each instance is distinguished only by its
+# KAFKA_CLIENT_ID.
+#
+# The sink is `noop`: proof of coordinated consumption comes from the
+# consumer-group lag draining to zero and from the receiver's rebalance /
+# partition-assignment logs, not from printed payloads. Swap `urn:otel:exporter:noop`
+# for `urn:otel:exporter:console` if you want to see decoded records.
+version: otel_dataflow/v1
+
+engine:
+  telemetry:
+    logs:
+      level: "info"
+
+groups:
+  default:
+    pipelines:
+      main:
+        policies:
+          channel_capacity:
+            control:
+              node: 100
+              pipeline: 100
+            pdata: 128
+
+        nodes:
+          kafka-receiver:
+            type: "urn:otel:receiver:kafka"
+            config:
+              brokers: ${env:KAFKA_BROKERS:-localhost:9092}
+              # group_id is required by the receiver (rejected if empty) and is
+              # what binds these instances into one coordinated consumer group.
+              group_id: ${env:KAFKA_GROUP_ID:-otap-consumer-group}
+              # Distinct per instance so members are individually identifiable in
+              # `kafka-consumer-groups --describe` and in the rebalance logs.
+              client_id: ${env:KAFKA_CLIENT_ID:-otap-consumer}
+              auto_offset_reset: earliest
+              # Cooperative-sticky incremental rebalancing: only the partitions
+              # that actually move are revoked/assigned when membership changes.
+              rebalance_strategy: cooperative_sticky
+              # Manual commit (the default): offsets are committed only after the
+              # downstream sink accepts the batch, and owned partitions are
+              # committed before they are revoked during a rebalance.
+              commit:
+                mode: manual
+              # Periodically publish receiver.kafka.consumer.group.lag so lag is
+              # observable via the admin metrics endpoint as well as the CLI.
+              lag_refresh_interval_ms: 5000
+              logs:
+                topics:
+                  - ${env:KAFKA_TOPIC:-otlp-logs}
+                encoding: otlp_proto
+
+          sink:
+            type: "urn:otel:exporter:noop"
+
+        connections:
+          - from: kafka-receiver
+            to: sink

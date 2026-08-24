@@ -1,0 +1,33 @@
+FROM --platform=$BUILDPLATFORM docker.io/rust:1.97 AS dataflow-build
+
+WORKDIR /build/rust/dataflow
+
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+ARG FEATURES
+ARG RUSTFLAGS="-C target-cpu=native"
+
+ENV FEATURES=${FEATURES}
+ENV RUSTFLAGS=${RUSTFLAGS}
+
+RUN apt-get update && apt-get install -y clang libclang-dev protobuf-compiler
+
+COPY --from=otel-arrow /proto/opentelemetry/proto /build/proto/opentelemetry/proto
+COPY --from=otel-arrow /proto/opentelemetry-proto /build/proto/opentelemetry-proto
+COPY --from=otel-arrow /rust/experimental /build/rust/experimental
+COPY --from=otel-arrow /THIRD_PARTY_NOTICES.txt /build/THIRD_PARTY_NOTICES.txt
+
+COPY . /build/rust/dataflow/.
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/rust/dataflow/target \
+    sed -i 's/\r$//' cross-arch-build.sh && ./cross-arch-build.sh
+
+FROM gcr.io/distroless/cc-debian13:nonroot
+
+WORKDIR /home/nonroot
+COPY --from=dataflow-build --chown=nonroot:nonroot /build/rust/dataflow/df_engine .
+
+USER nonroot
+ENTRYPOINT ["/home/nonroot/df_engine"]
