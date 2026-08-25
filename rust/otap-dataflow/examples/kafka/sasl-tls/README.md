@@ -61,8 +61,16 @@ docker compose -f compose.yaml -f compose.dataflow.yaml up --build
 `certgen` mints the certificates, `kafka-init` creates the SCRAM users and
 topics, then the `dataflow` engine connects to `kafka:9093` over SASL/TLS. Each
 producer emits a bounded batch (20 signals, `pre_generated`) and stops; the
-receivers keep running so you can inspect the groups. Use a second terminal for
-the checks below.
+receivers keep running so you can inspect the groups. `up` streams logs in the
+foreground, so run the checks below from a **second** terminal.
+
+The checks below use PowerShell (VS Code's default terminal). Set the compose
+file list once so every command can omit the `-f` flags (otherwise Compose
+fails with `no such service: dataflow`):
+
+```powershell
+$env:COMPOSE_FILE = "compose.yaml;compose.dataflow.yaml"
+```
 
 ## Web UI (Redpanda Console)
 
@@ -95,33 +103,18 @@ PASS: SCRAM-SHA-256 over TLS - kafka:9093 ...
 PASS: SCRAM-SHA-512 over TLS - kafka:9093 ...
 ```
 
-Portable equivalent for a single mechanism (repeat with the other users):
-
-```bash
-docker compose exec -T kafka bash -lc '
-cat >/tmp/client.properties <<EOF
-security.protocol=SASL_SSL
-ssl.truststore.location=/etc/kafka/secrets/kafka.truststore.jks
-ssl.truststore.password=changeit
-sasl.mechanism=SCRAM-SHA-256
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="scram256" password="scram256-secret";
-EOF
-kafka-broker-api-versions --bootstrap-server localhost:9093 \
-  --command-config /tmp/client.properties >/dev/null && echo "PASS: SCRAM-SHA-256 over TLS"'
-```
-
 ### 2. The engine produced and consumed over SASL/TLS
 
 The `dataflow` container's log is the end-to-end proof: every receiver had to
 complete a SASL/TLS handshake to be assigned its partition, and the console
 exporter only prints records the receiver decoded.
 
-```bash
+```powershell
 # Each consumer pipeline acquired its topic partition after authenticating.
-docker compose logs dataflow | grep -i partitions_assigned
+docker compose logs dataflow | Select-String partitions_assigned
 
 # The console exporters emitted decoded OTLP logs (resource/scope present).
-docker compose logs dataflow | grep -iE "resource|scope" | head
+docker compose logs dataflow | Select-String "resource|scope" | Select-Object -First 20
 ```
 
 Expected: a partition-assignment line for each of `plain-consumer`,
@@ -134,11 +127,10 @@ below to confirm each mechanism drained its topic.
 Ask the broker to describe each group directly. Zero lag proves the receiver
 authenticated, consumed every produced message, and committed its offsets.
 
-```bash
-for g in otap-plain-consumer otap-scram-256-consumer otap-scram-512-consumer; do
-  docker compose exec -T kafka \
-    kafka-consumer-groups --bootstrap-server kafka:29092 --describe --group "$g"
-done
+```powershell
+foreach ($g in "otap-plain-consumer", "otap-scram-256-consumer", "otap-scram-512-consumer") {
+  docker compose exec kafka kafka-consumer-groups --bootstrap-server kafka:29092 --describe --group $g
+}
 ```
 
 Expected for every group: `CURRENT-OFFSET` equals `LOG-END-OFFSET` and `LAG` is
@@ -160,7 +152,7 @@ by `kafka-sasl-tls.yaml` via `${env:...}` substitution.
 
 Inspect container logs:
 
-```bash
+```powershell
 docker compose logs --no-log-prefix certgen
 docker compose logs --no-log-prefix kafka
 docker compose logs --no-log-prefix dataflow
@@ -168,15 +160,15 @@ docker compose logs --no-log-prefix dataflow
 
 Regenerate certificates and broker state from scratch:
 
-```bash
-docker compose -f compose.yaml -f compose.dataflow.yaml down -v
-rm -rf certs
-docker compose -f compose.yaml -f compose.dataflow.yaml up --build
+```powershell
+docker compose down -v
+Remove-Item -Recurse -Force certs
+docker compose up --build
 ```
 
 ## Cleanup
 
-```bash
-docker compose -f compose.yaml -f compose.dataflow.yaml down -v
-rm -rf certs
+```powershell
+docker compose down -v
+Remove-Item -Recurse -Force certs
 ```
