@@ -110,12 +110,13 @@ Expected:
   partition. That confirms the members collectively consumed the whole topic
   and committed their offsets.
 
-Lag is also exported per receiver as `receiver.kafka.consumer.group.lag`
-(refreshed every 5s) on each consumer's admin endpoint:
+Lag is also exported per receiver as the `group_lag` gauge (OTel scope
+`receiver.kafka.consumer`, refreshed every 5s) on each consumer's admin
+endpoint:
 
 ```powershell
-curl.exe -s localhost:8080/telemetry/metrics | Select-String group   # consumer-a
-curl.exe -s localhost:8081/telemetry/metrics | Select-String group   # consumer-b
+curl.exe -s localhost:8080/api/v1/telemetry/metrics | Select-String group_lag   # consumer-a
+curl.exe -s localhost:8081/api/v1/telemetry/metrics | Select-String group_lag   # consumer-b
 ```
 
 ### 3. `group_id` is required
