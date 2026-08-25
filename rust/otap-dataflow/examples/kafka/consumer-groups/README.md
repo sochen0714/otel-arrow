@@ -74,6 +74,31 @@ Under **Consumer Groups**, watch `otap-consumer-group` split its 3 partitions
 across `consumer-a`/`consumer-b` and drain to zero lag - the same evidence as the
 CLI checks below. Under **Topics** you can inspect `otlp-logs` and its messages.
 
+### Rebalance-aware offset handling (no terminal)
+
+You can watch the rebalance handoff entirely in the Console. Open **Consumer
+Groups -> `otap-consumer-group`**; the page shows the group **state**, the
+**members** and the partitions each owns, and per-partition **committed offset**,
+**end offset**, and **lag**.
+
+1. Note the baseline: state `Stable`, two members owning a disjoint split of
+   `{0,1,2}`, and **lag 0** on every partition.
+2. Trigger a membership change without a command: in **Docker Desktop -> Containers**
+   (or the VS Code **Docker** panel), click **Stop** on
+   `consumer-groups-consumer-b-1`.
+3. Refresh the page. The state flips to `PreparingRebalance` then back to
+   `Stable` with a single member (`consumer-a`) now owning **all of `{0,1,2}`**.
+   The committed offsets for the moved partitions **stay where `consumer-b` left
+   them** (they do not reset to 0) and **lag returns to 0** - that is the
+   commit-before-revoke, no-gap handoff.
+4. Click **Start** on the container again; the partitions re-split across both
+   members and lag stays at 0.
+
+Committed offsets advancing monotonically (never rewinding) while lag returns to
+0 across the handoff is the visual proof of rebalance-aware handling. The
+Console does not expose a strict no-duplicates counter; that is the engine's
+`records_duplicates_total` gauge (`0`) on the admin metrics endpoint below.
+
 ## Validation
 
 Run these from a second terminal (not the one running `up`, whose streaming
