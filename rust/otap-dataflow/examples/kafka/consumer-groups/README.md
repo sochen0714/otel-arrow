@@ -52,8 +52,18 @@ docker compose -f compose.yaml -f compose.dataflow.yaml up --build
 ```
 
 The producer sends a bounded batch (`KAFKA_MAX_SIGNAL_COUNT`, default 300) and
-exits; the consumers keep running so you can inspect the group. Use a second
-terminal for the checks below.
+exits; the consumers keep running so you can inspect the group. `up` streams
+logs in the foreground, so run the checks below from a second terminal.
+
+The `producer`, `consumer-a`, and `consumer-b` services live in
+`compose.dataflow.yaml`, so **every** `docker compose` command in this guide
+must pass both files, not just `up`. Omitting them fails with
+`no such service: consumer-a`. To avoid repeating the flags, export the file
+list once per terminal instead:
+
+```bash
+export COMPOSE_FILE=compose.yaml:compose.dataflow.yaml
+```
 
 ## Web UI (Redpanda Console)
 
@@ -68,13 +78,32 @@ CLI checks below. Under **Topics** you can inspect `otlp-logs` and its messages.
 
 ## Validation
 
+Every command below is a **single line** so it can be pasted into any shell
+(bash, zsh, PowerShell, Git Bash) without line-continuation problems. Only two
+things differ on PowerShell:
+
+| POSIX shell                          | PowerShell                            |
+| ------------------------------------ | ------------------------------------- |
+| `... \| grep PATTERN`                | `... \| Select-String PATTERN`        |
+| `export COMPOSE_FILE=a.yaml:b.yaml`  | `$env:COMPOSE_FILE = "a.yaml;b.yaml"` |
+
+Where a command pipes to `grep`, a PowerShell version is given right after the
+POSIX one. Note the `COMPOSE_FILE` separator differs: `:` on Linux/macOS, `;` on
+Windows. Also avoid typing into the terminal running `up` -- its streaming
+output interleaves with your input and mangles the command.
+
 ### 1. Partition assignment is split across instances
 
 Each receiver logs the partitions it is assigned during every rebalance.
 
 ```bash
-docker compose logs consumer-a | grep kafka.rebalance.partitions_assigned
-docker compose logs consumer-b | grep kafka.rebalance.partitions_assigned
+docker compose -f compose.yaml -f compose.dataflow.yaml logs consumer-a | grep kafka.rebalance.partitions_assigned
+docker compose -f compose.yaml -f compose.dataflow.yaml logs consumer-b | grep kafka.rebalance.partitions_assigned
+```
+
+```powershell
+docker compose -f compose.yaml -f compose.dataflow.yaml logs consumer-a | Select-String kafka.rebalance.partitions_assigned
+docker compose -f compose.yaml -f compose.dataflow.yaml logs consumer-b | Select-String kafka.rebalance.partitions_assigned
 ```
 
 Expected: each consumer is assigned a **disjoint** subset of partitions
@@ -88,9 +117,7 @@ depends on join timing; what matters is that the partitions are partitioned
 Ask the broker to describe the group directly:
 
 ```bash
-docker compose exec kafka \
-  kafka-consumer-groups --bootstrap-server kafka:9092 \
-  --describe --group otap-consumer-group
+docker compose -f compose.yaml -f compose.dataflow.yaml exec kafka kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group otap-consumer-group
 ```
 
 Expected:
@@ -109,6 +136,11 @@ curl -s localhost:8080/telemetry/metrics | grep -i group   # consumer-a
 curl -s localhost:8081/telemetry/metrics | grep -i group   # consumer-b
 ```
 
+```powershell
+curl.exe -s localhost:8080/telemetry/metrics | Select-String group   # consumer-a
+curl.exe -s localhost:8081/telemetry/metrics | Select-String group   # consumer-b
+```
+
 ### 3. `group_id` is required
 
 The receiver rejects an empty `group_id` at config validation. `consumer.yaml`
@@ -116,8 +148,7 @@ sets it via `KAFKA_GROUP_ID` (default `otap-consumer-group`). To see the guard,
 run one engine with an empty value:
 
 ```bash
-docker compose run --rm --no-deps -e KAFKA_GROUP_ID= consumer-a \
-  --config file:/home/nonroot/consumer.yaml --validate-and-exit
+docker compose -f compose.yaml -f compose.dataflow.yaml run --rm --no-deps -e KAFKA_GROUP_ID= consumer-a --config file:/home/nonroot/consumer.yaml --validate-and-exit
 ```
 
 Expected: validation fails because the consumer group id must be non-empty.
@@ -129,16 +160,26 @@ revoked partitions with no gap and no re-consumption.
 
 ```bash
 # Stop one member; consumer-a should be assigned the freed partitions.
-docker compose stop consumer-b
-docker compose logs --since 30s consumer-a | grep kafka.rebalance.partitions_assigned
+docker compose -f compose.yaml -f compose.dataflow.yaml stop consumer-b
+docker compose -f compose.yaml -f compose.dataflow.yaml logs --since 30s consumer-a | grep kafka.rebalance.partitions_assigned
 
 # Re-describe: consumer-a now owns all 3 partitions and lag returns to 0.
-docker compose exec kafka \
-  kafka-consumer-groups --bootstrap-server kafka:9092 \
-  --describe --group otap-consumer-group
+docker compose -f compose.yaml -f compose.dataflow.yaml exec kafka kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group otap-consumer-group
 
 # Bring the second member back; partitions re-split across both.
-docker compose start consumer-b
+docker compose -f compose.yaml -f compose.dataflow.yaml start consumer-b
+```
+
+```powershell
+# Stop one member; consumer-a should be assigned the freed partitions.
+docker compose -f compose.yaml -f compose.dataflow.yaml stop consumer-b
+docker compose -f compose.yaml -f compose.dataflow.yaml logs --since 30s consumer-a | Select-String kafka.rebalance.partitions_assigned
+
+# Re-describe: consumer-a now owns all 3 partitions and lag returns to 0.
+docker compose -f compose.yaml -f compose.dataflow.yaml exec kafka kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group otap-consumer-group
+
+# Bring the second member back; partitions re-split across both.
+docker compose -f compose.yaml -f compose.dataflow.yaml start consumer-b
 ```
 
 Because the receiver commits owned partitions **before** they are revoked
