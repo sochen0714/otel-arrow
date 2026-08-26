@@ -1,0 +1,47 @@
+# Produces exactly three one-record Kafka messages at offsets 0, 1, and 2.
+version: otel_dataflow/v1
+
+engine:
+  telemetry:
+    logs:
+      level: "info"
+
+groups:
+  default:
+    pipelines:
+      main:
+        policies:
+          channel_capacity:
+            control:
+              node: 100
+              pipeline: 100
+            pdata: 16
+
+        nodes:
+          traffic-generator:
+            type: "urn:otel:receiver:traffic_generator"
+            config:
+              data_source: synthetic
+              generation_strategy: fresh
+              traffic_config:
+                production_mode: smooth
+                signals_per_second: 1
+                max_signal_count: 3
+                max_batch_size: 1
+                metric_weight: 0
+                trace_weight: 0
+                log_weight: 1
+
+          kafka-exporter:
+            type: "urn:otel:exporter:kafka"
+            config:
+              brokers: ${env:KAFKA_BROKERS:-localhost:9092}
+              client_id: offset-producer
+              allow_auto_create_topics: false
+              logs:
+                topic: ${env:KAFKA_TOPIC:-otlp-logs}
+                encoding: otlp_proto
+
+        connections:
+          - from: traffic-generator
+            to: kafka-exporter

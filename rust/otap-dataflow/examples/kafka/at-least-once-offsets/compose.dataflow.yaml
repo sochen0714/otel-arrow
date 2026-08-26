@@ -1,0 +1,51 @@
+# Overlay that adds the producer and delayed consumer to compose.yaml.
+#
+# Build contexts are relative to this feature folder:
+#   context   ../../..          -> rust/otap-dataflow
+#   otel-arrow ../../../../..   -> repository root
+
+x-dataflow-build: &dataflow-build
+  context: ../../..
+  dockerfile: examples/kafka/Dockerfile.dataflow
+  additional_contexts:
+    otel-arrow: ../../../../..
+  args:
+    TARGETPLATFORM: linux/amd64
+    FEATURES: kafka-receiver,kafka-exporter
+
+services:
+  producer:
+    build: *dataflow-build
+    image: otap-kafka-at-least-once-offsets:latest
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: otlp-logs
+    volumes:
+      - ./producer.yaml:/home/nonroot/producer.yaml:ro
+    command: ["--config", "file:/home/nonroot/producer.yaml", "--num-cores", "1"]
+
+  consumer:
+    build: *dataflow-build
+    image: otap-kafka-at-least-once-offsets:latest
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: otlp-logs
+      KAFKA_GROUP_ID: ${KAFKA_GROUP_ID:-offset-in-order}
+      ACK_DELAY: ${ACK_DELAY:-3s}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./consumer.yaml:/home/nonroot/consumer.yaml:ro
+    command:
+      - "--config"
+      - "file:/home/nonroot/consumer.yaml"
+      - "--num-cores"
+      - "1"
+      - "--http-admin-bind"
+      - "0.0.0.0:8080"

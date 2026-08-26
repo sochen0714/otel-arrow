@@ -1,0 +1,52 @@
+# Manual-commit consumer with a deliberate delay before the terminal noop sink.
+#
+# The delay creates a deterministic interval after Kafka delivery but before the
+# downstream Ack reaches the receiver. Killing the process during that interval
+# leaves the committed offset behind, so a restart replays the messages.
+version: otel_dataflow/v1
+
+engine:
+  telemetry:
+    logs:
+      level: "info"
+
+groups:
+  default:
+    pipelines:
+      main:
+        policies:
+          channel_capacity:
+            control:
+              node: 100
+              pipeline: 100
+            pdata: 16
+
+        nodes:
+          kafka-receiver:
+            type: "urn:otel:receiver:kafka"
+            config:
+              brokers: ${env:KAFKA_BROKERS:-localhost:9092}
+              group_id: ${env:KAFKA_GROUP_ID:-offset-in-order}
+              client_id: offset-consumer
+              auto_offset_reset: earliest
+              commit:
+                mode: manual
+              lag_refresh_interval_ms: 1000
+              logs:
+                topics:
+                  - ${env:KAFKA_TOPIC:-otlp-logs}
+                encoding: otlp_proto
+
+          ack-delay:
+            type: "urn:otel:processor:delay"
+            config:
+              delay: ${env:ACK_DELAY:-3s}
+
+          sink:
+            type: "urn:otel:exporter:noop"
+
+        connections:
+          - from: kafka-receiver
+            to: ack-delay
+          - from: ack-delay
+            to: sink

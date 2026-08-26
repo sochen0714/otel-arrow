@@ -156,6 +156,10 @@ leaving, so `consumer-a` resumes exactly where it left off. The
 `cooperative_sticky` strategy means only the partitions that actually move are
 revoked and reassigned, not the entire assignment.
 
+This case focuses on ownership transfer during a rebalance. For deterministic
+normal-ack offset advancement and crash-before-ack replay, see the separate
+[`at-least-once-offsets`](../at-least-once-offsets/) validation stack.
+
 ### 5. One instance, multiple cores (each core is a group member)
 
 The engine is thread-per-core: `--num-cores N` runs the whole pipeline on N
@@ -175,7 +179,7 @@ in the same container's output:
 docker compose logs consumer-a | Select-String kafka.rebalance.partitions_assigned
 ```
 
-```
+```text
 partitions=otlp-logs:1 ... core.id=0
 partitions=otlp-logs:0 ... core.id=1
 ```
@@ -187,7 +191,7 @@ container (same HOST and CLIENT-ID, different CONSUMER-ID) plus `consumer-b`:
 docker compose exec kafka kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group otap-consumer-group
 ```
 
-```
+```text
 PARTITION  LAG  CONSUMER-ID              HOST         CLIENT-ID
 1          0    consumer-a-00a790ef-...  /172.19.0.4  consumer-a   # core 0
 0          0    consumer-a-78cb37e2-...  /172.19.0.4  consumer-a   # core 1
@@ -218,10 +222,10 @@ identical at any core count.
 This case is gated behind the `bench` Compose profile, so a plain `up` never
 starts it and cases 1-5 stay pristine. It adds two services:
 
-| Service (bench profile) | Role                                                            |
-| ----------------------- | -------------------------------------------------------------- |
-| `producer-bench`        | Writes a large backlog of heavy records (`producer-bench.yaml`) |
-| `consumer-c`            | Kafka receiver in its **own** group, so it owns all 3 partitions alone (admin on port 8083) |
+| Service (bench profile) | Role |
+| --- | --- |
+| `producer-bench` | Writes a large backlog of heavy records (`producer-bench.yaml`) |
+| `consumer-c` | Kafka receiver in its **own** group, so it owns all 3 partitions alone (admin on port 8083) |
 
 `consumer-c` uses its own group on purpose: with all 3 partitions to itself, the
 1-core vs 3-core comparison is clean and independent of `consumer-a`/`consumer-b`.
@@ -299,27 +303,27 @@ Remove-Item Env:\CONSUMER_C_CORES, Env:\CONSUMER_C_GROUP, Env:\KAFKA_MAX_SIGNAL_
 
 ## Configuration knobs
 
-| Variable                   | Default               | Effect                                         |
-| -------------------------- | --------------------- | ---------------------------------------------- |
-| `KAFKA_MAX_SIGNAL_COUNT`   | `300`                 | Total log records to produce; `null` for a continuous stream |
-| `KAFKA_SIGNALS_PER_SECOND` | `50`                  | Producer emit rate                             |
-| `KAFKA_GROUP_ID`           | `otap-consumer-group` | Consumer group all instances join              |
-| `KAFKA_CLIENT_ID`          | per service           | Distinguishes instances in the group           |
-| `KAFKA_TOPIC`              | `otlp-logs`           | Topic produced to / consumed from              |
-| `KAFKA_BROKERS`            | `kafka:9092`          | Broker bootstrap address                       |
-| `CONSUMER_A_CORES`         | `1`                   | Cores for `consumer-a`; each core joins the group as its own member (set `2`+ for case 5) |
-| `CONSUMER_C_CORES`         | `3`                   | Cores for `consumer-c` in the throughput benchmark (case 6); set `1` vs `3` to compare |
-| `CONSUMER_C_GROUP`         | `otap-consumer-c-group` | `consumer-c`'s group; use a fresh value per benchmark run to re-read from earliest |
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `KAFKA_MAX_SIGNAL_COUNT` | `300` | Total log records to produce; `null` for a continuous stream |
+| `KAFKA_SIGNALS_PER_SECOND` | `50` | Producer emit rate |
+| `KAFKA_GROUP_ID` | `otap-consumer-group` | Consumer group all instances join |
+| `KAFKA_CLIENT_ID` | per service | Distinguishes instances in the group |
+| `KAFKA_TOPIC` | `otlp-logs` | Topic produced to / consumed from |
+| `KAFKA_BROKERS` | `kafka:9092` | Broker bootstrap address |
+| `CONSUMER_A_CORES` | `1` | Cores for `consumer-a`; each core joins the group as its own member (set `2`+ for case 5) |
+| `CONSUMER_C_CORES` | `3` | Cores for `consumer-c` in the throughput benchmark (case 6); set `1` vs `3` to compare |
+| `CONSUMER_C_GROUP` | `otap-consumer-c-group` | `consumer-c`'s group; use a fresh value per benchmark run to re-read from earliest |
 
 The `bench` profile also has these `producer-bench` knobs (case 6 only; the
 default `producer` is unaffected). Its own `KAFKA_MAX_SIGNAL_COUNT` default is
 `250000`:
 
-| Variable               | Default | Effect                                                       |
-| ---------------------- | ------- | ------------------------------------------------------------ |
-| `KAFKA_NUM_LOG_ATTRS`  | `25`    | Attributes per log record; more attributes = heavier decode  |
-| `KAFKA_LOG_BODY_BYTES` | `64`    | Log body size in bytes                                       |
-| `KAFKA_MAX_BATCH_SIZE` | `200`   | Records per Kafka message; keep batches under the broker's ~1 MB limit |
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `KAFKA_NUM_LOG_ATTRS` | `25` | Attributes per log record; more attributes = heavier decode |
+| `KAFKA_LOG_BODY_BYTES` | `64` | Log body size in bytes |
+| `KAFKA_MAX_BATCH_SIZE` | `200` | Records per Kafka message; keep batches under the broker's ~1 MB limit |
 
 ## Cleanup
 

@@ -19,7 +19,7 @@ cd rust/otap-dataflow/examples/kafka/<feature>
 docker compose -f compose.yaml -f compose.dataflow.yaml up --build
 ```
 
-Both features run entirely in containers; no local Rust toolchain or `cargo`
+All features run entirely in containers; no local Rust toolchain or `cargo`
 invocation is required.
 
 Each stack also includes a [Redpanda Console](https://github.com/redpanda-data/console)
@@ -28,10 +28,11 @@ groups from a browser. See each feature's README for details.
 
 ## Feature validation
 
-| Feature                | Folder                                 | What it validates                                                                                   | Status    |
-| ---------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------- | --------- |
-| Consumer groups        | [`consumer-groups/`](./consumer-groups/) | Coordinated consumption and partition assignment across receiver instances, required `group_id`, and rebalance-aware offset handling | Available |
-| SASL over TLS          | [`sasl-tls/`](./sasl-tls/)             | Broker authentication (SASL PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512) and transport encryption (TLS) for the receiver and exporter | Available |
+| Feature | Folder | What it validates | Status |
+| --- | --- | --- | --- |
+| Consumer groups | [`consumer-groups/`](./consumer-groups/) | Coordinated consumption and partition assignment across receiver instances, required `group_id`, and rebalance-aware offset handling | Available |
+| At-least-once offsets | [`at-least-once-offsets/`](./at-least-once-offsets/) | Manual-commit offset advancement and replay of delivered-but-unacknowledged messages after a consumer crash | Available |
+| SASL over TLS | [`sasl-tls/`](./sasl-tls/) | Broker authentication (SASL PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512) and transport encryption (TLS) for the receiver and exporter | Available |
 
 Each capability is validated in isolation so results are unambiguous. For
 example, the consumer-groups stack deliberately uses a plaintext broker so that
