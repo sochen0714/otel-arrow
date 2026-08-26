@@ -60,8 +60,12 @@ services:
     command:
       - "--config"
       - "file:/home/nonroot/consumer.yaml"
+      # Thread-per-core: each core runs its own kafka receiver and joins the
+      # group as a distinct member. Override to 2+ (CONSUMER_A_CORES=2) to make
+      # this single container present as multiple consumer-group members. See
+      # the "One instance, multiple cores" validation case in README.md.
       - "--num-cores"
-      - "1"
+      - "${CONSUMER_A_CORES:-1}"
       - "--http-admin-bind"
       - "0.0.0.0:8080"
 

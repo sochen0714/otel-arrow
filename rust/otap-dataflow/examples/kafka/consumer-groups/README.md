@@ -156,16 +156,67 @@ leaving, so `consumer-a` resumes exactly where it left off. The
 `cooperative_sticky` strategy means only the partitions that actually move are
 revoked and reassigned, not the entire assignment.
 
+### 5. One instance, multiple cores (each core is a group member)
+
+The engine is thread-per-core: `--num-cores N` runs the whole pipeline on N
+pinned threads, and the Kafka receiver is instantiated per core. So a single
+container joins the group as **N distinct members** - same `client_id`, but each
+with its own broker-assigned `member.id`. Recreate `consumer-a` with 2 cores:
+
+```powershell
+$env:CONSUMER_A_CORES = "2"
+docker compose up -d --no-deps consumer-a
+```
+
+Its two cores each log a partition assignment - note `core.id=0` vs `core.id=1`
+in the same container's output:
+
+```powershell
+docker compose logs consumer-a | Select-String kafka.rebalance.partitions_assigned
+```
+
+```
+partitions=otlp-logs:1 ... core.id=0
+partitions=otlp-logs:0 ... core.id=1
+```
+
+`--describe` now shows three members - two of them are the single `consumer-a`
+container (same HOST and CLIENT-ID, different CONSUMER-ID) plus `consumer-b`:
+
+```powershell
+docker compose exec kafka kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group otap-consumer-group
+```
+
+```
+PARTITION  LAG  CONSUMER-ID              HOST         CLIENT-ID
+1          0    consumer-a-00a790ef-...  /172.19.0.4  consumer-a   # core 0
+0          0    consumer-a-78cb37e2-...  /172.19.0.4  consumer-a   # core 1
+2          0    consumer-b-b04ddc6a-...  /172.19.0.6  consumer-b
+```
+
+Stop `consumer-b` and `consumer-a`'s two cores cover all three partitions by
+themselves (for example core 0 owns `{1,2}` and core 1 owns `{0}`). Parallelism
+is still capped by the partition count (3): members across every container and
+its cores beyond 3 sit idle.
+
+Return to the single-core default when done:
+
+```powershell
+Remove-Item Env:\CONSUMER_A_CORES
+docker compose up -d --no-deps consumer-a
+```
+
 ## Configuration knobs
 
 | Variable                   | Default               | Effect                                         |
 | -------------------------- | --------------------- | ---------------------------------------------- |
-| `KAFKA_MAX_SIGNAL_COUNT`   | `300`                 | Producer batch size; `null` for a continuous stream |
+| `KAFKA_MAX_SIGNAL_COUNT`   | `300`                 | Total log records to produce; `null` for a continuous stream |
 | `KAFKA_SIGNALS_PER_SECOND` | `50`                  | Producer emit rate                             |
 | `KAFKA_GROUP_ID`           | `otap-consumer-group` | Consumer group all instances join              |
 | `KAFKA_CLIENT_ID`          | per service           | Distinguishes instances in the group           |
 | `KAFKA_TOPIC`              | `otlp-logs`           | Topic produced to / consumed from              |
 | `KAFKA_BROKERS`            | `kafka:9092`          | Broker bootstrap address                       |
+| `CONSUMER_A_CORES`         | `1`                   | Cores for `consumer-a`; each core joins the group as its own member (set `2`+ for case 5) |
 
 ## Cleanup
 
