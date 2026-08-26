@@ -117,6 +117,7 @@ Write-Host 'PASS: producer created offsets 0, 1, and 2 in one partition.'
 
 Write-Host ''
 Write-Host 'Case 1: in-order acknowledgements advance the committed offset.'
+$env:CONSUMER_CONFIG = 'consumer.yaml'
 $env:KAFKA_GROUP_ID = 'offset-in-order'
 $env:ACK_DELAY = '3s'
 $null = Invoke-Compose -Arguments @(
@@ -187,6 +188,30 @@ Wait-Until -TimeoutSeconds 75 -Description 'the replay group to drain' -Conditio
     $null -ne $state -and $state.CurrentOffset -eq 3 -and $state.Lag -eq 0
 }
 Write-Host 'PASS: restart replayed uncommitted messages, then committed offset 3.'
+
+Write-Host ''
+Write-Host 'Case 3: a nack advances the committed offset without redelivery.'
+$null = Invoke-Compose -Arguments @('rm', '-sf', 'consumer')
+$env:CONSUMER_CONFIG = 'consumer-nack.yaml'
+$env:KAFKA_GROUP_ID = 'offset-nack'
+$null = Invoke-Compose -Arguments @(
+    'up', '-d', '--no-deps', '--force-recreate', 'consumer'
+)
+
+Wait-Until -TimeoutSeconds 30 -Description 'the nacking consumer to receive all messages' -Condition {
+    (Get-ReceivedCount) -eq 3
+}
+Write-Host '  every record was refused by the error exporter.'
+
+Wait-Until -TimeoutSeconds 30 -Description 'the nack group to commit offset 3' -Condition {
+    $state = Get-GroupState -Group $env:KAFKA_GROUP_ID
+    $null -ne $state -and $state.CurrentOffset -eq 3 -and $state.Lag -eq 0
+}
+Start-Sleep -Seconds 3
+if ((Get-ReceivedCount) -ne 3) {
+    throw 'A nacked record was redelivered; the receiver should not retry.'
+}
+Write-Host 'PASS: nack advanced the offset to 3 with no retry or redelivery.'
 
 Write-Host ''
 Write-Host 'All at-least-once offset validations passed.'

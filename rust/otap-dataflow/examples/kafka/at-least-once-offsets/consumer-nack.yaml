@@ -1,0 +1,48 @@
+# Manual-commit consumer whose terminal node always returns a Nack.
+#
+# The error exporter refuses every batch, so this stack shows what the receiver
+# does with a negative acknowledgement: it advances the committed offset just as
+# it would for an Ack. There is no automatic retry and no dead-letter queue, so a
+# Nack drops the record rather than redelivering it.
+version: otel_dataflow/v1
+
+engine:
+  telemetry:
+    logs:
+      level: "info"
+
+groups:
+  default:
+    pipelines:
+      main:
+        policies:
+          channel_capacity:
+            control:
+              node: 100
+              pipeline: 100
+            pdata: 16
+
+        nodes:
+          kafka-receiver:
+            type: "urn:otel:receiver:kafka"
+            config:
+              brokers: ${env:KAFKA_BROKERS:-localhost:9092}
+              group_id: ${env:KAFKA_GROUP_ID:-offset-nack}
+              client_id: offset-consumer
+              auto_offset_reset: earliest
+              commit:
+                mode: manual
+              lag_refresh_interval_ms: 1000
+              logs:
+                topics:
+                  - ${env:KAFKA_TOPIC:-otlp-logs}
+                encoding: otlp_proto
+
+          sink:
+            type: "urn:otel:exporter:error"
+            config:
+              message: "at-least-once-offsets: deliberate nack"
+
+        connections:
+          - from: kafka-receiver
+            to: sink

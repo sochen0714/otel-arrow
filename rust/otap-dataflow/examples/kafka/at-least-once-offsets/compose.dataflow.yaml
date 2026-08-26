@@ -41,7 +41,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./consumer.yaml:/home/nonroot/consumer.yaml:ro
+      - ./${CONSUMER_CONFIG:-consumer.yaml}:/home/nonroot/consumer.yaml:ro
     command:
       - "--config"
       - "file:/home/nonroot/consumer.yaml"
