@@ -206,6 +206,97 @@ Remove-Item Env:\CONSUMER_A_CORES
 docker compose up -d --no-deps consumer-a
 ```
 
+### 6. Multiple cores raise throughput (thread-per-core decode)
+
+Cases 1-5 prove *coordination*; this one measures *throughput*. The sink is
+`noop`, so the only per-record CPU cost is OTLP-proto decode. librdkafka already
+fetches every assigned partition in parallel background threads on a single core,
+so extra engine cores help **only when decode is the bottleneck** - that is, with
+a large, decode-heavy backlog. A trivially small load is fetch/IO-bound and looks
+identical at any core count.
+
+This case is gated behind the `bench` Compose profile, so a plain `up` never
+starts it and cases 1-5 stay pristine. It adds two services:
+
+| Service (bench profile) | Role                                                            |
+| ----------------------- | -------------------------------------------------------------- |
+| `producer-bench`        | Writes a large backlog of heavy records (`producer-bench.yaml`) |
+| `consumer-c`            | Kafka receiver in its **own** group, so it owns all 3 partitions alone (admin on port 8083) |
+
+`consumer-c` uses its own group on purpose: with all 3 partitions to itself, the
+1-core vs 3-core comparison is clean and independent of `consumer-a`/`consumer-b`.
+
+**Stage a fixed backlog.** Reset to an empty topic, then produce 4,000,000 log
+records (~5.8 GB) as heavy 200-record batches:
+
+```powershell
+$env:COMPOSE_FILE = "compose.yaml;compose.dataflow.yaml"
+docker compose down; docker compose up -d kafka kafka-init console
+$env:KAFKA_MAX_SIGNAL_COUNT = "4000000"
+docker compose --profile bench up -d --no-deps producer-bench
+```
+
+`producer-bench` exits once it has produced `KAFKA_MAX_SIGNAL_COUNT` records.
+Confirm the backlog - the sum of end offsets is the number of Kafka messages, and
+each message is a 200-record batch:
+
+```powershell
+docker compose exec kafka kafka-get-offsets --bootstrap-server kafka:9092 --topic otlp-logs
+# otlp-logs:0:6856  otlp-logs:1:6321  otlp-logs:2:6823  ->  20000 messages = 4,000,000 records
+```
+
+**Drain with 1 core.** A fresh group re-reads from earliest, so each run starts
+from the full backlog. Re-run `--describe` until `LAG` is 0, timing how long it
+takes (or watch the group in the Console UI):
+
+```powershell
+$env:CONSUMER_C_CORES = "1"; $env:CONSUMER_C_GROUP = "bench-1core"
+docker compose up -d --no-deps consumer-c
+docker compose exec kafka kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group bench-1core
+```
+
+**Drain with 3 cores** from the same backlog, using a new group:
+
+```powershell
+docker compose rm -sf consumer-c
+$env:CONSUMER_C_CORES = "3"; $env:CONSUMER_C_GROUP = "bench-3core"
+docker compose up -d --no-deps consumer-c
+docker compose exec kafka kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group bench-3core
+```
+
+Measured wall-clock time to drain the 20,000-message (4,000,000-record) backlog
+to zero lag on a laptop:
+
+| Cores | Group members                                | Drain time |
+| ----: | -------------------------------------------- | ---------- |
+|     1 | 1 (owns all 3 partitions, decodes serially)  | ~20 s      |
+|     3 | 3 (one partition each, decode in parallel)   | ~11 s      |
+
+Adding cores nearly halved the drain time. The receiver's throughput counter is
+**per core** - one series per `core.id` - so sum the series for a container's
+total:
+
+```powershell
+curl.exe -s http://localhost:8083/api/v1/telemetry/metrics | Select-String records_received_total
+# core_id=0 -> 6856   core_id=1 -> 6321   core_id=2 -> 6823   (sum 20000)
+```
+
+Each core owned exactly one partition and processed it end to end.
+(`records_received_total` counts Kafka *messages* - the 200-record batches - not
+individual log records.)
+
+The speedup is real but sub-linear (not 3x): a single broker with
+replication-factor 1 leaves fetch partly IO-bound, and a fixed startup/rebalance
+cost (~4-6 s) is included in both runs. As in case 5, parallelism is capped by
+the partition count (3) - a 4th core would sit idle.
+
+Return to the default stack when done:
+
+```powershell
+docker compose rm -sf consumer-c producer-bench
+Remove-Item Env:\CONSUMER_C_CORES, Env:\CONSUMER_C_GROUP, Env:\KAFKA_MAX_SIGNAL_COUNT -ErrorAction SilentlyContinue
+```
+
 ## Configuration knobs
 
 | Variable                   | Default               | Effect                                         |
@@ -217,6 +308,18 @@ docker compose up -d --no-deps consumer-a
 | `KAFKA_TOPIC`              | `otlp-logs`           | Topic produced to / consumed from              |
 | `KAFKA_BROKERS`            | `kafka:9092`          | Broker bootstrap address                       |
 | `CONSUMER_A_CORES`         | `1`                   | Cores for `consumer-a`; each core joins the group as its own member (set `2`+ for case 5) |
+| `CONSUMER_C_CORES`         | `3`                   | Cores for `consumer-c` in the throughput benchmark (case 6); set `1` vs `3` to compare |
+| `CONSUMER_C_GROUP`         | `otap-consumer-c-group` | `consumer-c`'s group; use a fresh value per benchmark run to re-read from earliest |
+
+The `bench` profile also has these `producer-bench` knobs (case 6 only; the
+default `producer` is unaffected). Its own `KAFKA_MAX_SIGNAL_COUNT` default is
+`250000`:
+
+| Variable               | Default | Effect                                                       |
+| ---------------------- | ------- | ------------------------------------------------------------ |
+| `KAFKA_NUM_LOG_ATTRS`  | `25`    | Attributes per log record; more attributes = heavier decode  |
+| `KAFKA_LOG_BODY_BYTES` | `64`    | Log body size in bytes                                       |
+| `KAFKA_MAX_BATCH_SIZE` | `200`   | Records per Kafka message; keep batches under the broker's ~1 MB limit |
 
 ## Cleanup
 

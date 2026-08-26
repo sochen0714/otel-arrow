@@ -91,3 +91,57 @@ services:
       - "1"
       - "--http-admin-bind"
       - "0.0.0.0:8080"
+
+  # consumer-c backs the multi-core THROUGHPUT benchmark (README case 6). It is
+  # in its own group by default so it owns every partition alone, making the
+  # 1-core vs N-core drain comparison clean. Gated behind the "bench" profile so
+  # a plain `docker compose up` still brings up only producer/consumer-a/consumer-b;
+  # start it explicitly with `docker compose up -d --no-deps consumer-c`.
+  consumer-c:
+    profiles: ["bench"]
+    build: *dataflow-build
+    image: otap-kafka-consumer-groups:latest
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: otlp-logs
+      KAFKA_GROUP_ID: ${CONSUMER_C_GROUP:-otap-consumer-c-group}
+      KAFKA_CLIENT_ID: consumer-c
+    ports:
+      - "8083:8080"
+    volumes:
+      - ./consumer.yaml:/home/nonroot/consumer.yaml:ro
+    command:
+      - "--config"
+      - "file:/home/nonroot/consumer.yaml"
+      # Each core is a distinct group member; with >= 3 partitions the cores
+      # drain in parallel. Override with CONSUMER_C_CORES (benchmark uses 1 vs 3).
+      - "--num-cores"
+      - "${CONSUMER_C_CORES:-3}"
+      - "--http-admin-bind"
+      - "0.0.0.0:8080"
+
+  # Bench-only producer: writes a large, decode-heavy backlog for the consumer-c
+  # throughput benchmark. Separate from `producer` so cases 1-5 are unaffected.
+  # Start it explicitly (it exits when KAFKA_MAX_SIGNAL_COUNT records are sent):
+  #   docker compose up -d --no-deps producer-bench
+  producer-bench:
+    profiles: ["bench"]
+    build: *dataflow-build
+    image: otap-kafka-consumer-groups:latest
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: otlp-logs
+      KAFKA_CLIENT_ID: otap-producer-bench
+      KAFKA_MAX_SIGNAL_COUNT: ${KAFKA_MAX_SIGNAL_COUNT:-250000}
+      KAFKA_SIGNALS_PER_SECOND: ${KAFKA_SIGNALS_PER_SECOND:-100000}
+      KAFKA_NUM_LOG_ATTRS: ${KAFKA_NUM_LOG_ATTRS:-25}
+      KAFKA_LOG_BODY_BYTES: ${KAFKA_LOG_BODY_BYTES:-64}
+    volumes:
+      - ./producer-bench.yaml:/home/nonroot/producer-bench.yaml:ro
+    command: ["--config", "file:/home/nonroot/producer-bench.yaml", "--num-cores", "1"]

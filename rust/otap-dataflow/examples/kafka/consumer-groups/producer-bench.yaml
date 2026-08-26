@@ -1,0 +1,60 @@
+# Benchmark producer: large, decode-heavy backlog for the consumer-c
+# multi-core THROUGHPUT case (README case 6). Kept separate from producer.yaml
+# so the other validation cases (1-5) are unaffected.
+#
+# The records are intentionally heavier than the default producer (many
+# attributes + a sized body) so that OTLP-proto decode on the consumer becomes
+# the bottleneck. That is what lets extra consumer cores raise throughput; with
+# trivially small records the workload is fetch/IO-bound and cores do not help.
+version: otel_dataflow/v1
+
+engine:
+  telemetry:
+    logs:
+      level: "info"
+
+groups:
+  default:
+    pipelines:
+      main:
+        policies:
+          channel_capacity:
+            control:
+              node: 100
+              pipeline: 100
+            pdata: 128
+
+        nodes:
+          traffic-generator:
+            type: "urn:otel:receiver:traffic_generator"
+            config:
+              data_source: synthetic
+              generation_strategy: fresh
+              traffic_config:
+                # Produce the whole backlog as fast as possible, then stop.
+                production_mode: open
+                signals_per_second: ${env:KAFKA_SIGNALS_PER_SECOND:-100000}
+                max_signal_count: ${env:KAFKA_MAX_SIGNAL_COUNT:-250000}
+                # Keep each Kafka message (a batch of records) under the broker's
+                # ~1 MB limit; heavy records mean fewer per batch.
+                max_batch_size: ${env:KAFKA_MAX_BATCH_SIZE:-200}
+                metric_weight: 0
+                trace_weight: 0
+                log_weight: 1
+                # Heavier records => heavier per-record decode on the consumer.
+                num_log_attributes: ${env:KAFKA_NUM_LOG_ATTRS:-25}
+                log_body_size_bytes: ${env:KAFKA_LOG_BODY_BYTES:-64}
+
+          kafka-exporter:
+            type: "urn:otel:exporter:kafka"
+            config:
+              brokers: ${env:KAFKA_BROKERS:-localhost:9092}
+              client_id: ${env:KAFKA_CLIENT_ID:-otap-producer-bench}
+              allow_auto_create_topics: false
+              logs:
+                topic: ${env:KAFKA_TOPIC:-otlp-logs}
+                encoding: otlp_proto
+
+        connections:
+          - from: traffic-generator
+            to: kafka-exporter
