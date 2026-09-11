@@ -1,0 +1,55 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The launcher copies this template into its per-run generated directory.
+
+version: otel_dataflow/v1
+engine:
+  telemetry:
+    logs:
+      level: info
+groups:
+  default:
+    pipelines:
+      main:
+        policies:
+          channel_capacity:
+            control:
+              node: 100
+              pipeline: 100
+            pdata: 128
+        nodes:
+          traffic-generator:
+            type: urn:otel:receiver:traffic_generator
+            config:
+              data_source: synthetic
+              generation_strategy: fresh
+              traffic_config:
+                signals_per_second: 60
+                max_signal_count: 600
+                max_batch_size: 1
+                metric_weight: 0
+                trace_weight: 0
+                log_weight: 1
+          kafka-exporter:
+            type: urn:otel:exporter:kafka
+            config:
+              brokers: kafka:9093
+              client_id: schema-demo-producer
+              allow_auto_create_topics: false
+              # Avoid sticky null-key batches concentrating this small fixture
+              # on a single partition. This is not a production recommendation.
+              partitioning_strategy: random
+              logs:
+                topic: schema-demo-logs
+                encoding: otlp_proto
+              auth:
+                sasl:
+                  mechanism: PLAIN
+                  username: ${env:KAFKA_DEMO_USERNAME__JSON}
+                  password: ${env:KAFKA_DEMO_PASSWORD__JSON}
+              tls:
+                ca_file: /home/nonroot/certs/ca.crt
+        connections:
+          - from: traffic-generator
+            to: kafka-exporter

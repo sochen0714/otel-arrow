@@ -1,0 +1,11 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# LOCAL adapter inputs only. This is NOT the proposed secret-reference contract.
+# Environment variable names and paths are mappings, not secret values.
+references:
+  demo-credentials:
+    usernameEnv: KAFKA_DEMO_USERNAME
+    passwordEnv: KAFKA_DEMO_PASSWORD
+  demo-ca:
+    caFile: /home/nonroot/certs/ca.crt

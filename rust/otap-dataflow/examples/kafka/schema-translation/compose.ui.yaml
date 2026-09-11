@@ -1,0 +1,122 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: kafka-schema-ui
+
+x-demo: &demo
+  image: otap-kafka-schema-tools:local
+  pull_policy: never
+  init: true
+  volumes:
+    - ./generated/ui:/output
+    - runtime-secrets:/runtime:ro
+    - kafka-ca:/home/nonroot/certs:ro
+
+services:
+  prepare:
+    <<: *demo
+    build:
+      context: .
+      dockerfile: Dockerfile.demo
+      args:
+        ENGINE_IMAGE: ${KAFKA_DEMO_IMAGE:-otap-kafka-consumer-groups:latest}
+        PIP_INDEX_URL: ${KAFKA_DEMO_PIP_INDEX_URL:-https://pypi.org/simple}
+    user: "0:0"
+    network_mode: none
+    command: [prepare]
+    volumes:
+      - ./generated/ui:/output
+      - runtime-secrets:/runtime
+
+  certgen:
+    image: eclipse-temurin:21-jdk-alpine
+    user: "0:0"
+    network_mode: none
+    depends_on:
+      prepare:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_DEMO_REUSE_CERTS: "true"
+    volumes:
+      - runtime-secrets:/runtime:ro
+      - kafka-secrets:/private
+      - kafka-ca:/public
+      - ./scripts:/scripts:ro
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - . /runtime/credentials.env; exec /bin/sh /scripts/generate-certs.sh
+
+  kafka:
+    extends:
+      file: compose.broker.yaml
+      service: kafka
+
+  kafka-init:
+    image: confluentinc/cp-kafka:8.3.1
+    networks: [isolated]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/bash", "/scripts/initialize-kafka.sh"]
+
+  consumer-a:
+    <<: *demo
+    networks: [isolated]
+    command: [engine, consumer-a]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  consumer-b:
+    <<: *demo
+    networks: [isolated]
+    command: [engine, consumer-b]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  verify:
+    <<: *demo
+    networks: [isolated]
+    command: [verify]
+    environment:
+      KAFKA_DEMO_IMAGE: ${KAFKA_DEMO_IMAGE:-otap-kafka-consumer-groups:latest}
+    depends_on:
+      consumer-a:
+        condition: service_started
+      consumer-b:
+        condition: service_started
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.16
+    networks: [isolated, ui]
+    ports:
+      - "127.0.0.1:${KAFKA_DEMO_UI_PORT:-8085}:8080"
+    environment:
+      CONFIG_FILEPATH: /etc/console/config.yaml
+    volumes:
+      - ./console.yaml:/etc/console/config.yaml:ro
+    depends_on:
+      verify:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/admin/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+networks:
+  isolated:
+    internal: true
+  # Docker Desktop needs a non-internal bridge to publish the loopback UI port.
+  # Kafka and the engines remain exclusively on the internal network.
+  ui: {}
+
+volumes:
+  kafka-data:
+  kafka-secrets:
+  kafka-ca:
+  runtime-secrets:

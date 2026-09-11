@@ -1,0 +1,19 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+ARG ENGINE_IMAGE=otap-kafka-consumer-groups:latest
+FROM ${ENGINE_IMAGE} AS engine
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+
+WORKDIR /demo
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+COPY requirements.txt requirements-demo.txt ./
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN pip install --no-cache-dir -r requirements-demo.txt
+COPY --from=engine /home/nonroot/df_engine /engine/df_engine
+COPY translate.py test_translate.py test_run_demo.py test_container_demo.py ./
+COPY customer.yaml bindings.yaml producer.yaml.template compose.ui.yaml console.yaml ./
+COPY scripts/ ./scripts/
+RUN mkdir /runtime /output && chown 65532:65532 /runtime /output
+USER 65532:65532
+ENTRYPOINT ["python", "scripts/container_demo.py"]

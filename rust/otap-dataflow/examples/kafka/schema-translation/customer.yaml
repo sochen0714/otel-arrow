@@ -1,0 +1,28 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# A proposed CUSTOMER receiver object, not a native engine configuration.
+name: kafka-local
+type: Kafka
+kafka:
+  brokers:
+    - kafka:9093
+  auth:
+    sasl:
+      mechanism: PLAIN
+      credentialReference: demo-credentials
+  tls:
+    caReference: demo-ca
+  subscription:
+    consumerGroup: schema-demo-group
+    signals:
+      logs:
+        topics:
+          - schema-demo-logs
+        encoding: otlpProto
+  delivery:
+    readCommitted: false
+  observability:
+    consumerLag:
+      enabled: true
+      refreshInterval: 5s

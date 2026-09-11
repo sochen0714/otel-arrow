@@ -1,0 +1,103 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Run through scripts/run_demo.py: credentials exist only in subprocess
+# environments and the project-scoped private broker volume, never in YAML.
+x-client-environment: &client-environment
+  KAFKA_DEMO_USERNAME__JSON: ${KAFKA_DEMO_USERNAME__JSON:?Use scripts/run_demo.py}
+  KAFKA_DEMO_PASSWORD__JSON: ${KAFKA_DEMO_PASSWORD__JSON:?Use scripts/run_demo.py}
+
+x-engine: &engine
+  image: ${KAFKA_DEMO_IMAGE:-otap-kafka-schema-translation:local}
+  pull_policy: never
+  environment: *client-environment
+  networks: [isolated]
+  depends_on:
+    kafka-init:
+      condition: service_completed_successfully
+
+services:
+  certgen:
+    image: eclipse-temurin:21-jdk-alpine
+    user: "0:0"
+    network_mode: none
+    environment:
+      KAFKA_DEMO_USERNAME: ${KAFKA_DEMO_USERNAME:?Use scripts/run_demo.py}
+      KAFKA_DEMO_PASSWORD: ${KAFKA_DEMO_PASSWORD:?Use scripts/run_demo.py}
+      KAFKA_DEMO_STORE_PASSWORD: ${KAFKA_DEMO_STORE_PASSWORD:?Use scripts/run_demo.py}
+    volumes:
+      - kafka-secrets:/private
+      - kafka-ca:/public
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/generate-certs.sh"]
+
+  kafka:
+    extends:
+      file: compose.broker.yaml
+      service: kafka
+
+  kafka-init:
+    image: confluentinc/cp-kafka:8.3.1
+    networks: [isolated]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/bash", "/scripts/initialize-kafka.sh"]
+
+  consumer-a:
+    <<: *engine
+    build:
+      context: ../../..
+      dockerfile: examples/kafka/schema-translation/Dockerfile.dataflow
+      additional_contexts:
+        otel-arrow: ../../../../..
+      args:
+        FEATURES: kafka-receiver,kafka-exporter
+    volumes:
+      - ${KAFKA_DEMO_GENERATED_DIR:-./generated}/consumer-a.yaml:/home/nonroot/consumer.yaml:ro
+      - kafka-ca:/home/nonroot/certs:ro
+    command:
+      - --config
+      - file:/home/nonroot/consumer.yaml
+      - --num-cores
+      - ${KAFKA_DEMO_CORES_A:-1}
+      - --http-admin-bind
+      - 127.0.0.1:8080
+
+  consumer-b:
+    <<: *engine
+    volumes:
+      - ${KAFKA_DEMO_GENERATED_DIR:-./generated}/consumer-b.yaml:/home/nonroot/consumer.yaml:ro
+      - kafka-ca:/home/nonroot/certs:ro
+    command:
+      - --config
+      - file:/home/nonroot/consumer.yaml
+      - --num-cores
+      - ${KAFKA_DEMO_CORES_B:-1}
+      - --http-admin-bind
+      - 127.0.0.1:8080
+
+  producer:
+    <<: *engine
+    profiles: [producer]
+    volumes:
+      - ${KAFKA_DEMO_GENERATED_DIR:-./generated}/producer.yaml:/home/nonroot/producer.yaml:ro
+      - kafka-ca:/home/nonroot/certs:ro
+    command:
+      - --config
+      - file:/home/nonroot/producer.yaml
+      - --num-cores
+      - "1"
+      - --http-admin-bind
+      - 127.0.0.1:8080
+
+networks:
+  isolated:
+    internal: true
+
+volumes:
+  kafka-data:
+  kafka-secrets:
+  kafka-ca:

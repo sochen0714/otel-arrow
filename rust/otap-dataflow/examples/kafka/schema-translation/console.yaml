@@ -1,0 +1,12 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Kafka administration is private to this Docker network. The UI is only
+# published on the host loopback interface; do not expose it publicly.
+kafka:
+  brokers: [kafka:29092]
+redpanda:
+  adminApi:
+    enabled: false
+analytics:
+  enabled: false
