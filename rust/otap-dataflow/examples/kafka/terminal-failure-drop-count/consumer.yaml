@@ -1,9 +1,7 @@
 # Manual-commit consumer whose terminal node always returns a Nack.
 #
-# The error exporter refuses every batch, so this stack shows what the receiver
-# does with a negative acknowledgement: it advances the committed offset just as
-# it would for an Ack. There is no automatic retry and no dead-letter queue, so a
-# Nack drops the record rather than redelivering it.
+# The error exporter refuses every batch. The Kafka receiver treats that Nack as
+# terminal, records it, advances the offset, and does not redeliver the record.
 version: otel_dataflow/v1
 
 engine:
@@ -27,8 +25,8 @@ groups:
             type: "urn:otel:receiver:kafka"
             config:
               brokers: ${env:KAFKA_BROKERS:-localhost:9092}
-              group_id: ${env:KAFKA_GROUP_ID:-offset-nack}
-              client_id: offset-consumer
+              group_id: ${env:KAFKA_GROUP_ID:-terminal-failure-drop-count}
+              client_id: terminal-failure-consumer
               auto_offset_reset: earliest
               commit:
                 mode: manual
@@ -38,11 +36,11 @@ groups:
                   - ${env:KAFKA_TOPIC:-otlp-logs}
                 encoding: otlp_proto
 
-          sink:
+          failing-sink:
             type: "urn:otel:exporter:error"
             config:
-              message: "at-least-once-offsets: deliberate nack"
+              message: "terminal-failure-drop-count: deliberate nack"
 
         connections:
           - from: kafka-receiver
-            to: sink
+            to: failing-sink

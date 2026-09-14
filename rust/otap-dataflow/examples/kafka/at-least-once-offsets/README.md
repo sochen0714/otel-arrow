@@ -6,8 +6,6 @@ behavior against a real Kafka broker:
 1. In-order downstream acknowledgements advance the committed offset.
 2. Killing the consumer after delivery but before acknowledgement leaves the
    offset uncommitted, so restart replays the messages.
-3. A negative acknowledgement (Nack) advances the committed offset the same way
-   an Ack does; there is no automatic retry or dead-letter redelivery.
 
 The stack is fully containerized and includes Redpanda Console for inspecting
 topic messages, consumer-group committed offsets, and lag.
@@ -29,13 +27,11 @@ flowchart LR
 | `kafka` | Single-node plaintext KRaft broker |
 | `kafka-init` | Creates `otlp-logs` with one deterministic partition |
 | `producer` | Produces three Kafka messages at offsets 0, 1, and 2 |
-| `consumer` | Manual-commit receiver; Cases 1-2 add a delay and noop sink, Case 3 swaps in an error (nack) sink |
+| `consumer` | Manual-commit receiver followed by a configurable delay and noop sink |
 | `console` | Web UI on <http://localhost:8082> |
 
 The delay is before the terminal sink. A message is therefore already delivered
-by Kafka while its downstream Ack is deliberately held back. Case 3 replaces the
-delay and noop sink with an error exporter (`urn:otel:exporter:error`) that
-refuses every batch, which is mounted by setting `CONSUMER_CONFIG`.
+by Kafka while its downstream Ack is deliberately held back.
 
 ## Prerequisites
 
@@ -76,10 +72,6 @@ Case 2: a crash before Ack causes replay after restart.
   first process received all 3 messages; committed offset has not advanced.
   restarted process received the same 3 messages again.
 PASS: restart replayed uncommitted messages, then committed offset 3.
-
-Case 3: a nack advances the committed offset without redelivery.
-  every record was refused by the error exporter.
-PASS: nack advanced the offset to 3 with no retry or redelivery.
 ```
 
 The stack remains running after success so its final state can be inspected in
@@ -117,15 +109,6 @@ committed offset 3 and lag 0.
 This is at-least-once delivery: a crash can cause duplicates, but the receiver
 does not skip an unacknowledged message.
 
-### Case 3: nack advances the offset
-
-Open `offset-nack`. The error exporter refuses every batch, yet the committed
-offset still advances to 3 with lag 0, and the admin metric stays at three
-received records (no redelivery). The receiver treats a Nack like an Ack for
-offset purposes: it advances past the failed record. There is currently no
-retry loop and no dead-letter queue, so a refused record is dropped rather than
-reprocessed.
-
 ## Why out-of-order Ack is not simulated here
 
 The public delay and noop nodes preserve delivery order; using timing races to
@@ -160,13 +143,14 @@ Kafka's committed offset is the **next** offset to read:
 | offsets `0` and `1` | `2` |
 | offsets `0`, `1`, and `2` | `3` |
 
-Tracking and commits are independent for every topic partition. A Nack advances
-the offset exactly like an Ack, so a refused record is not redelivered.
+Tracking and commits are independent for every topic partition. Terminal Nack
+behavior is validated separately in
+[`terminal-failure-drop-count`](../terminal-failure-drop-count/).
 
 ## Cleanup
 
 ```powershell
 $env:COMPOSE_FILE = "compose.yaml;compose.dataflow.yaml"
 docker compose down
-Remove-Item Env:\KAFKA_GROUP_ID, Env:\ACK_DELAY, Env:\CONSUMER_CONFIG -ErrorAction SilentlyContinue
+Remove-Item Env:\KAFKA_GROUP_ID, Env:\ACK_DELAY -ErrorAction SilentlyContinue
 ```

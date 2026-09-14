@@ -32,6 +32,7 @@ groups from a browser. See each feature's README for details.
 | --- | --- | --- | --- |
 | Consumer groups | [`consumer-groups/`](./consumer-groups/) | Coordinated consumption and partition assignment across receiver instances, required `group_id`, and rebalance-aware offset handling | Available |
 | At-least-once offsets | [`at-least-once-offsets/`](./at-least-once-offsets/) | Manual-commit offset advancement and replay of delivered-but-unacknowledged messages after a consumer crash | Available |
+| Terminal failure drop-and-count | [`terminal-failure-drop-count/`](./terminal-failure-drop-count/) | Terminal Nack offset advancement, refused-response counting, no redelivery, and pipeline drain | Available |
 | SASL over TLS | [`sasl-tls/`](./sasl-tls/) | Broker authentication (SASL PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512) and transport encryption (TLS) for the receiver and exporter | Available |
 
 Each capability is validated in isolation so results are unambiguous. For
