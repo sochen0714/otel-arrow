@@ -1,0 +1,41 @@
+slug: kafka_receiver_syslog_otlp_otap
+name: Kafka Receiver - Syslog to OTLP vs OTAP
+description: >-
+  Identical raw RFC 5424 Kafka input, one consumer pipeline core, and batching
+  of 1000 logs / 200ms. Only the downstream exporter and matching backend
+  receiver differ: OTLP/gRPC Protobuf versus OTAP Arrow. Kafka and output
+  compression are disabled. Received Log Rate is backend Perf throughput,
+  not receiver-only throughput. Dropped Logs is an independently sampled
+  observation-window difference, not permanent loss; use final verified counts
+  for bounded delivery deficits. Unrun rates have no data.
+
+chart:
+  metrics:
+    default: logs_received_rate
+  axes:
+    x:
+      title: Configured Load (logs/sec)
+      description: Aggregate target; compare with broker-confirmed Offered Load Rate.
+
+tests:
+  - name: 1k
+    loadgen_rate: 1000
+    label: 1k (smoke)
+  - name: 2k
+    loadgen_rate: 2000
+  - name: 5k
+    loadgen_rate: 5000
+  - name: 10k
+    loadgen_rate: 10000
+  - name: 20k
+    loadgen_rate: 20000
+  - name: 100k
+    loadgen_rate: 100000
+
+suites:
+  - name: Syslog - Kafka - OTLP (Logs)
+    slug: dfe_logs_kafka_syslog_otlp_recv
+    short: Syslog - Kafka - OTLP
+  - name: Syslog - Kafka - OTAP (Logs)
+    slug: dfe_logs_kafka_syslog_otap_recv
+    short: Syslog - Kafka - OTAP
