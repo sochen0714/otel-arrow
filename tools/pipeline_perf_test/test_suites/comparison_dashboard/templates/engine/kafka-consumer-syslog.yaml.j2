@@ -1,0 +1,73 @@
+version: otel_dataflow/v1
+policies:
+  telemetry:
+    runtime_metrics: normal
+  channel_capacity:
+    control:
+      node: 100
+      pipeline: 100
+    pdata: 100
+  resources:
+    core_allocation:
+      type: core_set
+      set:
+        - start: {{core_start}}
+          end: {{core_end}}
+engine:
+  telemetry:
+    logs:
+      level: info
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: urn:otel:receiver:kafka
+            config:
+              brokers: "kafka-broker:9092"
+              group_id: "{{kafka_consumer_group_id}}"
+              client_id: dfe-kafka-syslog-consumer
+              auto_offset_reset: earliest
+              commit:
+                mode: auto
+                interval_ms: 1000
+              session_timeout_ms: 30000
+              heartbeat_interval_ms: 3000
+              min_fetch_bytes: 1
+              max_fetch_bytes: 1048576
+              max_fetch_wait_ms: 500
+              max_partition_fetch_bytes: 1048576
+              isolation_level: read_uncommitted
+              logs:
+                topics: ["otel-syslog"]
+                encoding: syslog
+          batch:
+            type: urn:otel:processor:batch
+            config:
+              format: otap
+              otap:
+                sizer: items
+                min_size: {{syslog_batch_size}}
+                max_size: {{syslog_batch_size}}
+              max_batch_duration: {{syslog_batch_duration}}
+          exporter:
+{% if otap_export %}
+            type: urn:otel:exporter:otap
+            config:
+              grpc_endpoint: http://backend-service:1235
+              compression_method: none
+              streams_per_signal: {{otap_exporter_streams_per_signal}}
+              arrow:
+                payload_compression: none
+{% else %}
+            type: urn:otel:exporter:otlp_grpc
+            config:
+              grpc_endpoint: http://backend-service:1235
+              compression_method: null
+{% endif %}
+        connections:
+          - from: receiver
+            to: batch
+          - from: batch
+            to: exporter

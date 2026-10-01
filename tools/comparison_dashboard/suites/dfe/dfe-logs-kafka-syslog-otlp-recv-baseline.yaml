@@ -1,0 +1,30 @@
+name: Syslog - Kafka - OTLP (Logs)
+slug: dfe_logs_kafka_syslog_otlp_recv
+description: >-
+  One raw 1024-byte RFC 5424 Syslog message per Kafka record. One consumer
+  pipeline core parses into Arrow, batches 1000 logs / 200ms, and exports
+  uncompressed OTLP/gRPC to a DFE Perf backend. Matched with the OTAP suite.
+orchestrator_template: ../pipeline_perf_test/test_suites/comparison_dashboard/templates/orchestrator/dfe-kafka-syslog-recv-multi-rate.yaml
+
+meta:
+  binary: dfe
+  protocols: [syslog, otlp]
+  signals: [logs]
+  compression: none
+
+variables:
+  report: ../pipeline_perf_test/test_suites/comparison_dashboard/reports/report_logs.yaml
+  kafka_consumer_config: ../pipeline_perf_test/test_suites/comparison_dashboard/templates/engine/kafka-consumer-syslog.yaml.j2
+  backend_config: ../pipeline_perf_test/test_suites/comparison_dashboard/templates/backend/otlp.yaml.j2
+  compression_method: none
+  rates: [1000, 2000, 5000, 10000, 20000, 100000]
+  loadgen_threads: 1
+  loadgen_batch_size: 100
+  message_size: 1024
+  wait_for_data_interval: 10
+  drain_wait_secs: 10
+  drain_timeout_secs: 15
+  kafka_consumer_group_id: kafka-syslog-benchmark
+  syslog_batch_size: 1000
+  syslog_batch_duration: 200ms
+  otap_export: false

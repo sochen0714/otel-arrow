@@ -142,6 +142,8 @@ suites:
   - suites/dfe/dfe-traces-otlphttp-zstd-baseline.yaml
   # Isolated Kafka benchmarks (receiver vs exporter, logs signal).
   - suites/dfe/dfe-logs-kafka-syslog-receiver-only.yaml
+  - suites/dfe/dfe-logs-kafka-syslog-otlp-recv-baseline.yaml
+  - suites/dfe/dfe-logs-kafka-syslog-otap-recv-baseline.yaml
   - suites/dfe/dfe-logs-kafka-otlp-recv-baseline.yaml
   - suites/dfe/dfe-logs-kafka-otlp-export-baseline.yaml
   - suites/dfe/dfe-logs-kafka-otap-recv-baseline.yaml
@@ -236,6 +238,7 @@ suites:
 # existing YAML file with `slug` and `suites` (a list of suite refs).
 comparisons:
   - comparisons/kafka_receiver_syslog_receiver_only.yaml
+  - comparisons/kafka_receiver_syslog_otlp_otap.yaml
   - comparisons/log_baselines_multi_rate.yaml
   - comparisons/metric_baselines_multi_rate.yaml
   - comparisons/trace_baselines_multi_rate.yaml

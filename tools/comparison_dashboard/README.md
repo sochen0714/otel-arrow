@@ -180,6 +180,85 @@ series are unavailable, not zero. No network-output bytes or dropped-loss
 estimates are emitted. The default seven high-rate cases allow backlog; only an
 explicit `rates: [1000]` suite override activates full count-equality checking.
 
+## Matched Syslog Kafka OTLP and OTAP benchmarks
+
+These two suites share the receiver-only suite's raw producer and single-topic,
+single-partition Kafka input. They add a **1000-log / 200ms batch processor**
+and either an uncompressed OTLP/gRPC or OTAP exporter on consumer core 1,
+followed by the matching receiver and Perf sink on backend core 2. OTAP uses
+five streams per signal; OTLP uses its default five in-flight requests.
+This is backend delivery throughput, not isolated parsing or receiver speed.
+
+Follow the Linux/native-WSL setup and image-build commands above, with at least
+three logical CPUs and spare resources for Kafka and the producer. The suites
+reuse `syslog_loadgen_image`, `kafka_image`, and `df_engine_image` from the
+manifest. No additional producer or dependency installation is needed.
+
+From `tools/comparison_dashboard` with the same venv active:
+
+```bash
+python dashboard.py validate
+python dashboard.py run \
+  suites/dfe/dfe-logs-kafka-syslog-otlp-recv-baseline.yaml \
+  suites/dfe/dfe-logs-kafka-syslog-otap-recv-baseline.yaml --generate-only
+python dashboard.py run \
+  suites/dfe/dfe-logs-kafka-syslog-otlp-recv-baseline.yaml \
+  --tests 1k,2k,5k,10k,20k,100k --observation-interval 20
+python dashboard.py run \
+  suites/dfe/dfe-logs-kafka-syslog-otap-recv-baseline.yaml \
+  --tests 1k,2k,5k,10k,20k,100k --observation-interval 20
+python dashboard.py build
+python dashboard.py serve --port 3000
+```
+
+Visit `http://localhost:3000/compare/kafka_receiver_syslog_otlp_otap/`.
+Run sequentially: the four container names are `load-generator`, `kafka-broker`,
+`kafka-consumer`, and `backend-service`. They share the receiver-only network
+`kafka-syslog-benchmark` and loopback ports 18085, 19094, and 18088, plus backend
+admin port 18087. Backend data uses internal port 1235. The suite refuses to
+replace existing containers. Do not run alongside other suites or rebuild or
+retag images during measurements.
+
+Each run uses 1024-byte plain, non-CEF RFC 5424 values, no compression, one
+producer thread, and scheduling batches of 100 individual Kafka records.
+Timing is 10s warmup, 20s observation, producer stop/flush, 10s bounded drain,
+and a 15s consumer shutdown timeout. Producer counters are captured after flush;
+consumer metrics before its admin endpoint exits; **final backend counters
+after consumer shutdown**, before backend shutdown. The Kafka record sample is
+captured afterward so its CLI startup cannot extend the final-count cutoff.
+
+The strict verifier requires integral producer/byte/backend counts, producer
+health and batch counters, exporter success evidence, four image IDs, rendered
+configs, and an actual 1024-byte Kafka sample. It rejects observed failure/refused
+outcomes. Unemitted error series are unavailable, not zero. The 1k smoke requires
+aggregate count equality; higher rates record bounded deficits, not proven loss.
+Verification runs again before SQL reporting so cleanup after a failed step
+cannot bypass the evidence gate. Consumer health does not cover later shutdown
+progress; aggregate equality does not establish identity or field fidelity.
+
+The existing generic `report_logs.yaml` and backend templates are reused without
+changing other baselines. **Received Log Rate** is successful backend Perf items;
+**Offered Load Rate** is broker-confirmed input. Consumer CPU includes receiver,
+batch, and exporter; approximately 100% is one core. The generic **Dropped Logs**
+metric is only an independently sampled observation-window difference and can
+be negative. It must not be read as permanent loss. The red dashboard warning
+is a target-rate shortfall heuristic, not measured Kafka lag or network
+saturation. Use final `verified-delivery.json` for the separate bounded counts.
+
+Artifacts are retained under
+`.data/dfe_logs_kafka_syslog_{otlp,otap}_recv/<timestamp>/tests/<rate>/`:
+SQL reports, time series, final producer/backend `.prom` files,
+`consumer-before-shutdown.prom`, `images.txt`, `kafka-record.txt`, both rendered
+configs, and `verified-delivery.json`. Preserve the orchestrator logs as error
+evidence; admin connection errors after shutdown are not observation failures.
+Do not commit `.data`, `.site`, profiles, or virtual environments.
+
+The [measured summary](../../KAFKA_SYSLOG_OTLP_OTAP_BENCHMARK_SUMMARY.md) records
+the 12 historical cases, final counts, image IDs, and limitations. No higher
+matched-protocol targets were measured. A fresh checkout displays no results,
+not measured zeros; `build` does not run benchmarks. These historical results
+are not measurements of a fresh build of this PR.
+
 ## Directory Structure
 
 ```text
