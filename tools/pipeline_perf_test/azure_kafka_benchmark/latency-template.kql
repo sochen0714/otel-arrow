@@ -1,0 +1,65 @@
+// Generated for one producer invocation. Run in your Log Analytics workspace -> Logs, KQL mode.
+// Use the query's time range (or a portal range covering the entire run).
+// Percentiles are sampled, approximate SOURCE-TO-INGESTION latency, not Azure-only
+// latency or HTTP response latency. Missing runs remain incomplete, not "lost".
+let ProbeRunId = "__RUN_ID__";
+let ExpectedProbes = long(__EXPECTED__);
+let BrokerAcknowledged = long(__ACKNOWLEDGED__);
+let ProducerAndClockOK = __PRODUCER_AND_CLOCK_OK__;
+let SourceStarted = datetime(__STARTED__);
+let SourceFinished = datetime(__FINISHED__);
+let Rows = materialize(
+    SyslogKafkaBench_CL
+    | where TimeGenerated between ((SourceStarted - 1h) .. (SourceFinished + 1h))
+    | where SyslogAppName == "kbench-probe" and SyslogMsgId == "LA-LATENCY"
+    | extend Probe = parse_json(SyslogMessage), IngestedAt = ingestion_time()
+    | where tostring(Probe.kind) == "kafka-la-probe-v1"
+        and tostring(Probe.run_id) == ProbeRunId
+    | extend Sequence = tolong(Probe.sequence), SourceSentAt = todatetime(Probe.sent_at)
+    | extend Malformed = isnull(Sequence) or Sequence < 0 or Sequence >= ExpectedProbes
+        or isnull(SourceSentAt) or SourceSentAt < SourceStarted or SourceSentAt > SourceFinished
+);
+let Samples = materialize(
+    Rows
+    | where not(Malformed)
+    | summarize Copies = count(), FirstIngestedAt = min(IngestedAt),
+        EarliestSourceTime = min(SourceSentAt), LatestSourceTime = max(SourceSentAt),
+        MissingIngestionTimes = countif(isnull(IngestedAt)) by Sequence
+    | extend ConflictingSourceTime = EarliestSourceTime != LatestSourceTime
+    | extend RawLatencyMs = todouble(datetime_diff("microsecond", FirstIngestedAt, EarliestSourceTime)) / 1000.0
+    | extend Valid = MissingIngestionTimes == 0 and not(ConflictingSourceTime)
+        and isnotnull(RawLatencyMs) and RawLatencyMs >= 0
+    | extend LatencyMs = iff(Valid, RawLatencyMs, real(null))
+);
+Samples
+| summarize UniqueProbes = count(), ValidSamples = countif(Valid),
+    DuplicateRows = sum(Copies - 1),
+    NegativeLatencyProbes = countif(RawLatencyMs < 0),
+    MissingIngestionTimeProbes = countif(MissingIngestionTimes > 0),
+    ConflictingTimestampProbes = countif(ConflictingSourceTime),
+    ObservedP50Ms = percentile(LatencyMs, 50),
+    ObservedP95Ms = percentile(LatencyMs, 95),
+    ObservedP99Ms = percentile(LatencyMs, 99)
+| extend RunId = ProbeRunId, ExpectedProbes, BrokerAcknowledged,
+    StoredRows = toscalar(Rows | count),
+    MalformedRows = toscalar(Rows | summarize countif(Malformed)),
+    QueryAsOfUtc = now()
+| extend MissingProbes = max_of(0, ExpectedProbes - UniqueProbes)
+| extend Status = case(
+    not(ProducerAndClockOK), "INVALID_PRODUCER_OR_CLOCK",
+    MalformedRows > 0 or NegativeLatencyProbes > 0 or MissingIngestionTimeProbes > 0
+        or ConflictingTimestampProbes > 0, "INVALID_SAMPLE_DATA",
+    MissingProbes > 0, "INCOMPLETE_WAIT_AND_REQUERY",
+    ValidSamples < 1000, "COMPLETE_SMALL_SAMPLE",
+    "COMPLETE")
+| extend Complete = Status in ("COMPLETE", "COMPLETE_SMALL_SAMPLE")
+| extend p50_ms = iff(Complete, ObservedP50Ms, real(null)),
+    p95_ms = iff(Complete, ObservedP95Ms, real(null)),
+    p99_ms = iff(Complete, ObservedP99Ms, real(null)),
+    P99Caution = iff(ValidSamples < 1000,
+        "Exploratory: fewer than 1000 probes; tail estimate is fragile.",
+        "Sampled approximate ingestion latency; 1000 samples is not a confidence guarantee.")
+| project RunId, QueryAsOfUtc, Status, ExpectedProbes, BrokerAcknowledged,
+    UniqueProbes, ValidSamples, MissingProbes, StoredRows, DuplicateRows,
+    MalformedRows, NegativeLatencyProbes, MissingIngestionTimeProbes,
+    ConflictingTimestampProbes, p50_ms, p95_ms, p99_ms, P99Caution

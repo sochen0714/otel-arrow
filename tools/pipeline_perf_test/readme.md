@@ -220,6 +220,15 @@ Suites in the test_suites directory include detailed setup and execution
 instructions. Generally applicable instructions for the continuous integration suite
 are provided below for reference.
 
+### Standalone Azure Kafka Latency Probes
+
+The [Azure Kafka latency utility](azure_kafka_benchmark/README.md) sends bounded,
+timestamped probes through an existing Kafka/DFE/Azure Monitor pipeline and
+generates a Log Analytics percentile query. It is separate from the orchestrator:
+it does not provision infrastructure, drive throughput tests, or import dashboard
+CSV results. Its default invocation displays help; `--check` sends no probe
+records, and only explicit `--run` starts a probe campaign.
+
 ### Run Test Suites
 
 #### Pre-Reqs (first time)
