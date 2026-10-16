@@ -1,0 +1,50 @@
+Sanitized excerpts from completed run ff-sasl-5750616-a56aaaf7d4.
+Full sanitized logs remain in the ignored .runs directory; results.json records the assertions.
+
+CASE inline-username: PASS; decoded bodies=3; acquisition-exit=
+{"timestamp":"1970-01-01T00:00:00.000000000Z","observed_timestamp":"2026-10-16T23:05:13.932482349Z","body":"task-5750616-ff-sasl-5750616-a56aaaf7d4-record-1","attributes":{},"scope":{"attributes":{}}}
+{"timestamp":"1970-01-01T00:00:00.000000000Z","observed_timestamp":"2026-10-16T23:05:13.932851857Z","body":"task-5750616-ff-sasl-5750616-a56aaaf7d4-record-2","attributes":{},"scope":{"attributes":{}}}
+{"timestamp":"1970-01-01T00:00:00.000000000Z","observed_timestamp":"2026-10-16T23:05:13.932871658Z","body":"task-5750616-ff-sasl-5750616-a56aaaf7d4-record-3","attributes":{},"scope":{"attributes":{}}}
+
+CASE file-username: PASS; decoded bodies=3; acquisition-exit=
+{"timestamp":"1970-01-01T00:00:00.000000000Z","observed_timestamp":"2026-10-16T23:05:18.140541794Z","body":"task-5750616-ff-sasl-5750616-a56aaaf7d4-record-1","attributes":{},"scope":{"attributes":{}}}
+{"timestamp":"1970-01-01T00:00:00.000000000Z","observed_timestamp":"2026-10-16T23:05:18.140701416Z","body":"task-5750616-ff-sasl-5750616-a56aaaf7d4-record-2","attributes":{},"scope":{"attributes":{}}}
+{"timestamp":"1970-01-01T00:00:00.000000000Z","observed_timestamp":"2026-10-16T23:05:18.140720619Z","body":"task-5750616-ff-sasl-5750616-a56aaaf7d4-record-3","attributes":{},"scope":{"attributes":{}}}
+
+CASE missing-password: PASS; decoded bodies=0; acquisition-exit=1
+2026-10-16T23:05:20.875Z  WARN  otel.extension.flat_file_sasl_auth::flat_file_sasl_auth.credential_refresh_failed: [error=failed to read `password_secret_file` /credentials/missing: No such file or directory (os error 2)] entity/pipeline.attrs: pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0
+2026-10-16T23:05:23.866Z  ERROR otel-arrow-dfe-state::state.observed_error: Pipeline encountered a runtime error. [pipeline_group_id=default, pipeline_id=validate, core_id=0, event_type=runtime_error, error_kind=runtime, error=Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate]
+Pipeline failed to run: Pipeline runtime error: runtime recovery failed for default:validate core=0 generation=0 after 5 restart attempt(s): Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate
+
+CASE malformed-password: PASS; decoded bodies=0; acquisition-exit=1
+2026-10-16T23:05:49.208Z  WARN  otel.extension.flat_file_sasl_auth::flat_file_sasl_auth.credential_refresh_failed: [error=invalid credential from `password_secret_file` /credentials/malformed: file does not contain valid UTF-8] entity/pipeline.attrs: pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0
+2026-10-16T23:05:52.192Z  ERROR otel-arrow-dfe-state::state.observed_error: Pipeline encountered a runtime error. [pipeline_group_id=default, pipeline_id=validate, core_id=0, event_type=runtime_error, error_kind=runtime, error=Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate]
+Pipeline failed to run: Pipeline runtime error: runtime recovery failed for default:validate core=0 generation=0 after 5 restart attempt(s): Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate
+
+CASE empty-password: PASS; decoded bodies=0; acquisition-exit=1
+2026-10-16T23:06:17.628Z  WARN  otel.extension.flat_file_sasl_auth::flat_file_sasl_auth.credential_refresh_failed: [error=invalid credential from `password_secret_file` /credentials/empty: Password is invalid: Password cannot be empty] entity/pipeline.attrs: pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0
+2026-10-16T23:06:20.605Z  ERROR otel-arrow-dfe-state::state.observed_error: Pipeline encountered a runtime error. [pipeline_group_id=default, pipeline_id=validate, core_id=0, event_type=runtime_error, error_kind=runtime, error=Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate]
+Pipeline failed to run: Pipeline runtime error: runtime recovery failed for default:validate core=0 generation=0 after 5 restart attempt(s): Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate
+
+CASE missing-username: PASS; decoded bodies=0; acquisition-exit=1
+2026-10-16T23:06:46.392Z  WARN  otel.extension.flat_file_sasl_auth::flat_file_sasl_auth.credential_refresh_failed: [error=failed to read `username_file` /credentials/missing: No such file or directory (os error 2)] entity/pipeline.attrs: pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0
+2026-10-16T23:06:49.386Z  ERROR otel-arrow-dfe-state::state.observed_error: Pipeline encountered a runtime error. [pipeline_group_id=default, pipeline_id=validate, core_id=0, event_type=runtime_error, error_kind=runtime, error=Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate]
+Pipeline failed to run: Pipeline runtime error: runtime recovery failed for default:validate core=0 generation=0 after 5 restart attempt(s): Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate
+
+CASE malformed-username: PASS; decoded bodies=0; acquisition-exit=1
+2026-10-16T23:07:15.186Z  WARN  otel.extension.flat_file_sasl_auth::flat_file_sasl_auth.credential_refresh_failed: [error=invalid credential from `username_file` /credentials/malformed: file does not contain valid UTF-8] entity/pipeline.attrs: pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0
+2026-10-16T23:07:18.172Z  ERROR otel-arrow-dfe-state::state.observed_error: Pipeline encountered a runtime error. [pipeline_group_id=default, pipeline_id=validate, core_id=0, event_type=runtime_error, error_kind=runtime, error=Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate]
+Pipeline failed to run: Pipeline runtime error: runtime recovery failed for default:validate core=0 generation=0 after 5 restart attempt(s): Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate
+
+CASE empty-username: PASS; decoded bodies=0; acquisition-exit=1
+2026-10-16T23:07:43.887Z  WARN  otel.extension.flat_file_sasl_auth::flat_file_sasl_auth.credential_refresh_failed: [error=invalid credential from `username_file` /credentials/empty: Username is invalid: Username cannot be empty] entity/pipeline.attrs: pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0
+2026-10-16T23:07:46.867Z  ERROR otel-arrow-dfe-state::state.observed_error: Pipeline encountered a runtime error. [pipeline_group_id=default, pipeline_id=validate, core_id=0, event_type=runtime_error, error_kind=runtime, error=Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate]
+Pipeline failed to run: Pipeline runtime error: runtime recovery failed for default:validate core=0 generation=0 after 5 restart attempt(s): Pipeline runtime error: Extension `credentials` (shared) did not signal readiness within 3s; pipeline startup aborted on the readiness gate
+
+CASE wrong-password: PASS; decoded bodies=0; acquisition-exit=
+2026-10-16T23:08:12.727Z  ERROR librdkafka::event /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rdkafka-0.39.0/src/client.rs:74: librdkafka: FAIL [thrd:sasl_ssl://kafka:9093/bootstrap]: sasl_ssl://kafka:9093/bootstrap: SASL authentication error: Authentication failed: Invalid username or password (after 306ms in state AUTH_REQ) entity/node.attrs: node.id=kafka node.urn=urn:otel:receiver:kafka node.type=receiver pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0
+2026-10-16T23:08:12.727Z  ERROR otel.receiver.kafka::kafka.transport_error: [error=Message consumption error: Authentication (Local: Authentication failure)] entity/node.attrs: node.id=kafka node.urn=urn:otel:receiver:kafka node.type=receiver pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0
+
+CASE wrong-username-no-fallback: PASS; decoded bodies=0; acquisition-exit=
+2026-10-16T23:08:19.407Z  ERROR librdkafka::event /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rdkafka-0.39.0/src/client.rs:74: librdkafka: FAIL [thrd:sasl_ssl://kafka:9093/bootstrap]: sasl_ssl://kafka:9093/bootstrap: SASL authentication error: Authentication failed: Invalid username or password (after 302ms in state AUTH_REQ) entity/node.attrs: node.id=kafka node.urn=urn:otel:receiver:kafka node.type=receiver pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0
+2026-10-16T23:08:19.407Z  ERROR otel.receiver.kafka::kafka.transport_error: [error=Message consumption error: Authentication (Local: Authentication failure)] entity/node.attrs: node.id=kafka node.urn=urn:otel:receiver:kafka node.type=receiver pipeline.id=validate pipeline.group.id=default deployment.generation=0 core.id=0 numa.node.id=0

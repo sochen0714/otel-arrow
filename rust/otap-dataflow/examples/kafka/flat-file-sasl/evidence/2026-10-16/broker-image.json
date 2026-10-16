@@ -1,0 +1,7 @@
+{
+  "RepoDigests": [
+    "confluentinc/cp-kafka@sha256:0ad069035863aa1b090f4d9af47bfd2c08dc32864f3575d7d8579e3155c2586d"
+  ],
+  "Id": "sha256:0ad069035863aa1b090f4d9af47bfd2c08dc32864f3575d7d8579e3155c2586d",
+  "Image": "confluentinc/cp-kafka:8.3.1"
+}

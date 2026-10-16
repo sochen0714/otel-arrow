@@ -1,0 +1,7 @@
+{
+  "PassedCases": 10,
+  "TestsSucceeded": true,
+  "ExpectedCases": 10,
+  "LastCase": "wrong-username-no-fallback",
+  "CleanupSucceeded": true
+}

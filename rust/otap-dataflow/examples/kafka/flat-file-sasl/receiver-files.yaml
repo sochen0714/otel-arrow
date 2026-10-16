@@ -1,0 +1,45 @@
+version: otel_dataflow/v1
+engine:
+  telemetry:
+    logs:
+      level: info
+groups:
+  default:
+    pipelines:
+      validate:
+        extensions:
+          credentials:
+            type: urn:otel:extension:flat_file_sasl_auth
+            config:
+              # Deliberately valid fallback bait: selected file errors must fail.
+              username: plain
+              username_file: ${env:SASL_USERNAME_FILE:-/credentials/username}
+              password_secret_file: ${env:SASL_PASSWORD_FILE:-/credentials/password}
+              password_secret_file_refresh: 1h
+              startup_timeout: 3s
+        nodes:
+          kafka:
+            type: urn:otel:receiver:kafka
+            capabilities:
+              sasl_credential_provider: credentials
+            config:
+              brokers: kafka:9093
+              group_id: ${env:KAFKA_GROUP_ID}
+              client_id: ${env:KAFKA_GROUP_ID}
+              auto_offset_reset: earliest
+              auth:
+                sasl:
+                  mechanism: PLAIN
+                  credential_source: capability
+              tls:
+                ca_file: /certs/ca.crt
+              logs:
+                topics: [flat-file-sasl-logs]
+                encoding: plaintext
+          output:
+            type: urn:otel:exporter:console
+            config:
+              format: record_json
+        connections:
+          - from: kafka
+            to: output

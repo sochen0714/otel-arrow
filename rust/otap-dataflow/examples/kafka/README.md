@@ -7,7 +7,7 @@ focused README needed to run it. The `df_engine` Dockerfile
 ([`Dockerfile.dataflow`](./Dockerfile.dataflow)) is shared by every example and
 lives here at the `kafka/` root.
 
-Every example follows the same pattern:
+Most examples follow the same pattern:
 
 - a `compose.yaml` that stands up a Kafka broker (and any topic bootstrap), and
 - a `compose.dataflow.yaml` overlay that builds one `df_engine` image (from the
@@ -22,7 +22,7 @@ docker compose -f compose.yaml -f compose.dataflow.yaml up --build
 All features run entirely in containers; no local Rust toolchain or `cargo`
 invocation is required.
 
-Each stack also includes a [Redpanda Console](https://github.com/redpanda-data/console)
+Most stacks also include a [Redpanda Console](https://github.com/redpanda-data/console)
 web UI (on <http://localhost:8082>) for browsing topics, messages, and consumer
 groups from a browser. See each feature's README for details.
 
@@ -34,6 +34,11 @@ groups from a browser. See each feature's README for details.
 | At-least-once offsets | [`at-least-once-offsets/`](./at-least-once-offsets/) | Manual-commit offset advancement and replay of delivered-but-unacknowledged messages after a consumer crash | Available |
 | Terminal failure drop-and-count | [`terminal-failure-drop-count/`](./terminal-failure-drop-count/) | Terminal Nack offset advancement, refused-response counting, no redelivery, and pipeline drain | Available |
 | SASL over TLS | [`sasl-tls/`](./sasl-tls/) | Broker authentication (SASL PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512) and transport encryption (TLS) for the receiver and exporter | Available |
+| Flat-file SASL credentials | [`flat-file-sasl/`](./flat-file-sasl/) | Real extension capability binding, both username sources, exact decoded output, safe file/authentication failures, and no username fallback over SASL_SSL | Available |
+
+The flat-file SASL example uses a PowerShell 7 harness for isolated, bounded
+runtime cases and automatic scoped cleanup, without a web UI or host ports.
+See its README instead of the generic `compose up` command above.
 
 Each capability is validated in isolation so results are unambiguous. For
 example, the consumer-groups stack deliberately uses a plaintext broker so that

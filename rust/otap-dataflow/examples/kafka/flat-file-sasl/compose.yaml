@@ -1,0 +1,25 @@
+# Reuse the existing SASL_SSL broker and certificate-generation scripts.
+# No published ports, shared broker state, or optional web UI.
+services:
+  certgen:
+    extends:
+      file: ../sasl-tls/compose.yaml
+      service: certgen
+    volumes:
+      - certificates:/certs
+    mem_limit: 512m
+    cpus: 1
+
+  kafka:
+    extends:
+      file: ../sasl-tls/compose.yaml
+      service: kafka
+    volumes:
+      - certificates:/etc/kafka/secrets:ro
+    environment:
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    mem_limit: 1536m
+    cpus: 1
+
+volumes:
+  certificates:

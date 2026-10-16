@@ -1,0 +1,35 @@
+services:
+  receiver:
+    image: ${FLAT_FILE_IMAGE:?Run scripts/Test-FlatFileSasl.ps1}
+    build:
+      context: ../../..
+      dockerfile: examples/kafka/Dockerfile.dataflow
+      additional_contexts:
+        otel-arrow: ../../../../..
+      args:
+        TARGETPLATFORM: linux/amd64
+        FEATURES: kafka,flat-file-sasl-auth
+        RUSTFLAGS: -C target-cpu=x86-64
+      labels:
+        org.opencontainers.image.revision: ${FLAT_FILE_SOURCE_SHA:?}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_GROUP_ID: ${FLAT_FILE_GROUP:?}
+      SASL_USERNAME_FILE: ${FLAT_FILE_USERNAME_FILE:-/credentials/username}
+      SASL_PASSWORD_FILE: ${FLAT_FILE_PASSWORD_FILE:-/credentials/password}
+    volumes:
+      - ./receiver-inline.yaml:/validation/receiver-inline.yaml:ro
+      - ./receiver-files.yaml:/validation/receiver-files.yaml:ro
+      - ${FLAT_FILE_RUN_DIR:?}/credentials:/credentials:ro
+      - certificates:/certs:ro
+    mem_limit: 512m
+    cpus: 1
+    command:
+      - --config
+      - file:/validation/${FLAT_FILE_CONFIG:-receiver-inline.yaml}
+      - --num-cores
+      - "1"
+      - --http-admin-bind
+      - 127.0.0.1:8080

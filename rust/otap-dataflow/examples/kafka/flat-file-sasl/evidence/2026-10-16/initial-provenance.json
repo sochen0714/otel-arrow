@@ -1,0 +1,13 @@
+{
+  "BinarySha256": "3fe737f04b051726f5961b31aed07c6573fd93c114fb1dd7437c212f49efb444",
+  "ImageId": "sha256:7c422335b3fe1100024c1326dcb8ac8d94c5511c0b688d11d1dc512b222616a4",
+  "Project": "ff-sasl-5750616-4c571fe932",
+  "Image": "otap-flat-file-sasl:5750616-cd29e57b4",
+  "StartedUtc": "2026-10-16T22:57:24.2340134Z",
+  "Transport": "SASL_SSL",
+  "Encoding": "plaintext",
+  "Mechanism": "PLAIN",
+  "Features": "kafka,flat-file-sasl-auth",
+  "Rustflags": "-C target-cpu=x86-64",
+  "Source": "cd29e57b470bb7555fe7cf13c5e91ebaf3a40e24"
+}

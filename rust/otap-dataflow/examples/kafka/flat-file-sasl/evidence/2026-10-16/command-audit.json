@@ -1,0 +1,137 @@
+[
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml build receiver",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml down --volumes --remove-orphans --timeout 10",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml exec -T kafka kafka-console-producer --bootstrap-server kafka:9093 --producer.config /tmp/flat-file-client.properties --topic flat-file-sasl-logs",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml exec -T kafka kafka-get-offsets --bootstrap-server kafka:9093 --command-config /tmp/flat-file-client.properties --topic flat-file-sasl-logs",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml exec -T kafka kafka-topics --bootstrap-server kafka:9093 --command-config /tmp/flat-file-client.properties --create --topic flat-file-sasl-logs --partitions 1 --replication-factor 1",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml exec -T kafka sh -c umask 077; cat > /tmp/flat-file-client.properties",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml logs --no-color --no-log-prefix kafka certgen",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml logs --no-color --no-log-prefix receiver",
+    "ExitCode": 0,
+    "Invocations": 184
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml ps -a --format json receiver",
+    "ExitCode": 0,
+    "Invocations": 4
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml ps -aq receiver",
+    "ExitCode": 0,
+    "Invocations": 8
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml stop -t 5 receiver",
+    "ExitCode": 0,
+    "Invocations": 10
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml up -d --no-deps --force-recreate receiver",
+    "ExitCode": 0,
+    "Invocations": 10
+  },
+  {
+    "Command": "docker compose --project-name ff-sasl-5750616-a56aaaf7d4 -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.yaml -f C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\compose.dataflow.yaml up -d --wait --wait-timeout 180 kafka",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker cp 1b684e12adb17036729b2b56c38a6c1b947498ecd13f092f0dc92b9eb92812d5:/home/nonroot/df_engine C:\\Users\\sochen\\source\\repos\\copilot-worktrees\\sochen0714_otel-arrow\\sochen0714-fluffy-adventure\\rust\\otap-dataflow\\examples\\kafka\\flat-file-sasl\\.runs\\ff-sasl-5750616-a56aaaf7d4\\df_engine",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker create otap-flat-file-sasl:cd29e57b470b --help",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker image inspect confluentinc/cp-kafka:8.3.1",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker image inspect otap-flat-file-sasl:cd29e57b470b",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker inspect --format {{json .State}} 012e767ef6b1f1e1dc26310c8ab026c2dec58405a75f426d1e62eaa94a437933",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker inspect --format {{json .State}} 1bd1cfa07972caf3a82fe7fbccef88ca32ec5eefecf845cd1696dd91f85938f1",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker inspect --format {{json .State}} 817caea40dc4c302e6a44d313ea8f6e7747f8964b702aa28e7d6c5cbe2857979",
+    "ExitCode": 0,
+    "Invocations": 27
+  },
+  {
+    "Command": "docker inspect --format {{json .State}} 8fa30994ec0c19509938bf3a3699daf511db7f684dc2a18bd0d951b3b24dc521",
+    "ExitCode": 0,
+    "Invocations": 27
+  },
+  {
+    "Command": "docker inspect --format {{json .State}} 9be8afe3f61d88febad68c1d01ccfc1543c405595d49fc97d24494153ef31f23",
+    "ExitCode": 0,
+    "Invocations": 28
+  },
+  {
+    "Command": "docker inspect --format {{json .State}} 9ec9e66e5bd03181724b0edb4baec4a55fce3ca2b84973a081e1880c7e45fbc2",
+    "ExitCode": 0,
+    "Invocations": 27
+  },
+  {
+    "Command": "docker inspect --format {{json .State}} b51b005f5fee3f5ccefbc02da6c588323228f7364e7d8fd0a7020a7ec1ddcadb",
+    "ExitCode": 0,
+    "Invocations": 28
+  },
+  {
+    "Command": "docker inspect --format {{json .State}} d0bae20dd140061b59516376b8d6043d9bb9572d6824771442ba8ecfb7591a7c",
+    "ExitCode": 0,
+    "Invocations": 27
+  },
+  {
+    "Command": "docker rm 1b684e12adb17036729b2b56c38a6c1b947498ecd13f092f0dc92b9eb92812d5",
+    "ExitCode": 0,
+    "Invocations": 1
+  },
+  {
+    "Command": "docker version --format {{.Server.Version}}",
+    "ExitCode": 0,
+    "Invocations": 1
+  }
+]

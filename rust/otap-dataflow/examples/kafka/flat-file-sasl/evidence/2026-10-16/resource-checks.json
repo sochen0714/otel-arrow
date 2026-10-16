@@ -1,0 +1,18 @@
+[
+  {
+    "Project": "ff-sasl-5750616-4c571fe932",
+    "ContainersRemaining": 0,
+    "VolumesRemaining": 0,
+    "NetworksRemaining": 0,
+    "CredentialFilesRemaining": 0,
+    "ExtractedBinaryRemaining": false
+  },
+  {
+    "Project": "ff-sasl-5750616-a56aaaf7d4",
+    "ContainersRemaining": 0,
+    "VolumesRemaining": 0,
+    "NetworksRemaining": 0,
+    "CredentialFilesRemaining": 0,
+    "ExtractedBinaryRemaining": false
+  }
+]

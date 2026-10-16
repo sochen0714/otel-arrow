@@ -1,0 +1,86 @@
+[
+  {
+    "Case": "inline-username",
+    "Outcome": "PASS",
+    "Bodies": [
+      "task-5750616-ff-sasl-5750616-4c571fe932-record-1",
+      "task-5750616-ff-sasl-5750616-4c571fe932-record-2",
+      "task-5750616-ff-sasl-5750616-4c571fe932-record-3"
+    ],
+    "Log": "inline-username.log"
+  },
+  {
+    "Case": "file-username",
+    "Outcome": "PASS",
+    "Bodies": [
+      "task-5750616-ff-sasl-5750616-4c571fe932-record-1",
+      "task-5750616-ff-sasl-5750616-4c571fe932-record-2",
+      "task-5750616-ff-sasl-5750616-4c571fe932-record-3"
+    ],
+    "Log": "file-username.log"
+  },
+  {
+    "Case": "missing-password",
+    "Outcome": "PASS",
+    "ExitCode": 1,
+    "ErrorPattern": "failed to read .password_secret_file.",
+    "Bodies": [],
+    "Log": "missing-password.log"
+  },
+  {
+    "Case": "malformed-password",
+    "Outcome": "PASS",
+    "ExitCode": 1,
+    "ErrorPattern": "invalid credential from .password_secret_file..*valid UTF-8",
+    "Bodies": [],
+    "Log": "malformed-password.log"
+  },
+  {
+    "Case": "empty-password",
+    "Outcome": "PASS",
+    "ExitCode": 1,
+    "ErrorPattern": "invalid credential from .password_secret_file..*cannot be empty",
+    "Bodies": [],
+    "Log": "empty-password.log"
+  },
+  {
+    "Case": "missing-username",
+    "Outcome": "PASS",
+    "ExitCode": 1,
+    "ErrorPattern": "failed to read .username_file.",
+    "Bodies": [],
+    "Log": "missing-username.log"
+  },
+  {
+    "Case": "malformed-username",
+    "Outcome": "PASS",
+    "ExitCode": 1,
+    "ErrorPattern": "invalid credential from .username_file..*valid UTF-8",
+    "Bodies": [],
+    "Log": "malformed-username.log"
+  },
+  {
+    "Case": "empty-username",
+    "Outcome": "PASS",
+    "ExitCode": 1,
+    "ErrorPattern": "invalid credential from .username_file..*cannot be empty",
+    "Bodies": [],
+    "Log": "empty-username.log"
+  },
+  {
+    "Case": "wrong-password",
+    "Outcome": "PASS",
+    "ExitCode": null,
+    "ErrorPattern": "(?i)SASL authentication (error|failed)|Authentication failure|SaslAuthenticationFailed",
+    "Bodies": [],
+    "Log": "wrong-password.log"
+  },
+  {
+    "Case": "wrong-username-no-fallback",
+    "Outcome": "PASS",
+    "ExitCode": null,
+    "ErrorPattern": "(?i)SASL authentication (error|failed)|Authentication failure|SaslAuthenticationFailed",
+    "Bodies": [],
+    "Log": "wrong-username-no-fallback.log"
+  }
+]
