@@ -3,8 +3,8 @@
 
 //! Topic declarations for inter-pipeline communication.
 
-use crate::Description;
 use crate::error::Error;
+use crate::{Description, PipelineGroupId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -85,6 +85,26 @@ impl From<&TopicName> for Cow<'static, str> {
 impl From<&'static str> for TopicName {
     fn from(value: &'static str) -> Self {
         Self::parse(value).expect("invalid static topic name literal")
+    }
+}
+
+/// Opaque identity used to resolve pipeline-local topic names against declared bindings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TopicScope(TopicScopeKind);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TopicScopeKind {
+    Global,
+    /// Topics declared for this pipeline group ID in the startup configuration.
+    StartupGroup(PipelineGroupId),
+}
+
+impl TopicScope {
+    /// The global topic scope.
+    pub const GLOBAL: Self = Self(TopicScopeKind::Global);
+
+    pub(crate) fn startup_group(pipeline_group_id: PipelineGroupId) -> Self {
+        Self(TopicScopeKind::StartupGroup(pipeline_group_id))
     }
 }
 
@@ -254,6 +274,22 @@ impl TopicPolicies {
                 "{path_prefix}.broadcast.queue_capacity must be greater than 0"
             ));
         }
+        if self.broadcast.ack_mode == TopicBroadcastAckMode::All
+            && self.broadcast.on_lag == TopicBroadcastOnLagPolicy::DropOldest
+        {
+            // A skipped delivery never reaches branch-local recovery, while
+            // upstream replay can duplicate branches that already succeeded.
+            errors.push(format!(
+                "{path_prefix}.broadcast.ack_mode=all requires broadcast.on_lag=disconnect"
+            ));
+        }
+        if self.broadcast.ack_mode == TopicBroadcastAckMode::All
+            && self.ack_propagation.mode == TopicAckPropagationMode::Disabled
+        {
+            errors.push(format!(
+                "{path_prefix}.broadcast.ack_mode=all requires ack_propagation.mode=auto"
+            ));
+        }
         if self.ack_propagation.max_in_flight == 0 {
             errors.push(format!(
                 "{path_prefix}.ack_propagation.max_in_flight must be greater than 0"
@@ -294,8 +330,9 @@ pub struct TopicBroadcastPolicies {
     /// Behavior when a broadcast subscriber falls behind the retained ring window.
     #[serde(default)]
     pub on_lag: TopicBroadcastOnLagPolicy,
-    // TODO(#2252 PR3): add a user-facing `ack_mode` field here and reject the
-    // config combinations that aren't safe (e.g. `all` with a lossy lag policy).
+    /// Ack/Nack aggregation mode for tracked broadcast publishes.
+    #[serde(default)]
+    pub ack_mode: TopicBroadcastAckMode,
 }
 
 impl Default for TopicBroadcastPolicies {
@@ -303,6 +340,7 @@ impl Default for TopicBroadcastPolicies {
         Self {
             queue_capacity: default_topic_broadcast_queue_capacity(),
             on_lag: TopicBroadcastOnLagPolicy::default(),
+            ack_mode: TopicBroadcastAckMode::default(),
         }
     }
 }
@@ -445,6 +483,10 @@ mod tests {
             TopicBroadcastOnLagPolicy::DropOldest
         );
         assert_eq!(
+            topic.policies.broadcast.ack_mode,
+            TopicBroadcastAckMode::First
+        );
+        assert_eq!(
             topic.policies.balanced.on_full,
             TopicQueueOnFullPolicy::Block
         );
@@ -475,6 +517,7 @@ policies:
   broadcast:
     queue_capacity: 2
     on_lag: disconnect
+    ack_mode: all
   ack_propagation:
     mode: auto
     max_in_flight: 3
@@ -498,8 +541,58 @@ policies:
             TopicBroadcastOnLagPolicy::Disconnect
         );
         assert_eq!(
+            topic.policies.broadcast.ack_mode,
+            TopicBroadcastAckMode::All
+        );
+        assert_eq!(
             topic.policies.balanced.on_full,
             TopicQueueOnFullPolicy::DropNewest
+        );
+    }
+
+    /// Scenario: a broadcast topic requests all-subscriber Ack consensus with lossy lag handling.
+    /// Guarantees: validation rejects a policy with no unambiguous branch-local recovery path.
+    #[test]
+    fn rejects_all_ack_mode_with_drop_oldest() {
+        let mut topic = TopicSpec::default();
+        topic.policies.broadcast.ack_mode = TopicBroadcastAckMode::All;
+        topic.policies.ack_propagation.mode = TopicAckPropagationMode::Auto;
+
+        let errors = topic.validation_errors("topics.raw");
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0],
+            "topics.raw.policies.broadcast.ack_mode=all requires broadcast.on_lag=disconnect"
+        );
+    }
+
+    /// Scenario: a broadcast topic requests all-subscriber Ack consensus with disconnect-on-lag.
+    /// Guarantees: validation accepts the explicit failure boundary required by strict consensus.
+    #[test]
+    fn accepts_all_ack_mode_with_disconnect() {
+        let mut topic = TopicSpec::default();
+        topic.policies.broadcast.ack_mode = TopicBroadcastAckMode::All;
+        topic.policies.broadcast.on_lag = TopicBroadcastOnLagPolicy::Disconnect;
+        topic.policies.ack_propagation.mode = TopicAckPropagationMode::Auto;
+
+        assert!(topic.validation_errors("topics.raw").is_empty());
+    }
+
+    /// Scenario: all-subscriber Ack consensus is configured while Ack propagation is disabled.
+    /// Guarantees: validation rejects an Ack mode that cannot affect the topic boundary.
+    #[test]
+    fn rejects_all_ack_mode_with_ack_propagation_disabled() {
+        let mut topic = TopicSpec::default();
+        topic.policies.broadcast.ack_mode = TopicBroadcastAckMode::All;
+        topic.policies.broadcast.on_lag = TopicBroadcastOnLagPolicy::Disconnect;
+
+        let errors = topic.validation_errors("topics.raw");
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0],
+            "topics.raw.policies.broadcast.ack_mode=all requires ack_propagation.mode=auto"
         );
     }
 

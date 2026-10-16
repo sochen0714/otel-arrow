@@ -53,9 +53,9 @@ impl OtlpProtoBytes {
     #[must_use]
     pub fn new_from_bytes<B>(signal: SignalType, b: B) -> Self
     where
-        B: Into<Vec<u8>>,
+        B: Into<Bytes>,
     {
-        let bytes: Bytes = b.into().into();
+        let bytes: Bytes = b.into();
         match signal {
             SignalType::Logs => Self::ExportLogsRequest(bytes),
             SignalType::Metrics => Self::ExportMetricsRequest(bytes),
@@ -100,6 +100,26 @@ impl OtlpProtoBytes {
             OtlpProtoBytes::ExportLogsRequest(bytes)
             | OtlpProtoBytes::ExportMetricsRequest(bytes)
             | OtlpProtoBytes::ExportTracesRequest(bytes) => bytes.clone(),
+        }
+    }
+
+    /// Borrows the shared encoded buffer.
+    #[must_use]
+    pub const fn bytes(&self) -> &Bytes {
+        match self {
+            Self::ExportLogsRequest(bytes)
+            | Self::ExportMetricsRequest(bytes)
+            | Self::ExportTracesRequest(bytes) => bytes,
+        }
+    }
+
+    /// Takes ownership of the shared encoded buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> Bytes {
+        match self {
+            Self::ExportLogsRequest(bytes)
+            | Self::ExportMetricsRequest(bytes)
+            | Self::ExportTracesRequest(bytes) => bytes,
         }
     }
 

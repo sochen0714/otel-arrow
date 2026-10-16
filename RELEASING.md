@@ -1,257 +1,238 @@
 # Releasing
 
-This document describes the release process for the OTel Arrow repository.
-A single release version covers both the Go components (under `go/` and
-`collector/`) and the Rust workspace (under `rust/otap-dataflow/`).
+Go and Rust OTAP Dataflow releases are versioned independently. Both use the
+same reviewed preparation and protected publication model:
 
-## Overview
+```text
+scheduled or manual preparation
+            |
+            v
+automatic version calculation
+            |
+            v
+reviewed release PR
+            |
+            v
+merge starts Push Release
+            |
+            v
+protected environment approval
+            |
+            v
+publish crates, tag, and publish GitHub release
+```
 
-The repository uses two GitHub Actions workflows to manage releases:
+## Release identities
 
-1. **Prepare Release**: Renders pending changelog entries, bumps versions,
-   and opens a pull request.
-2. **Push Release**: Creates git tags and publishes the GitHub release.
+| Component | Version source | Tag |
+| --- | --- | --- |
+| Go | Latest `go/vX.Y.Z` tag | `go/vX.Y.Z` |
+| Rust OTAP Dataflow | Latest `rust/otap-dataflow/vX.Y.Z` tag | `rust/otap-dataflow/vX.Y.Z` |
 
-This two-step process ensures that all changes are reviewed before the release
-is published.
+Unqualified `vX.Y.Z` tags are retained as historical tags but are not created
+by the independent release workflows.
+
+Each component gets its own GitHub release because a GitHub release is
+anchored to one tag.
 
 ## Prerequisites
 
-1. **Maintainer Access**: Only repository maintainers can trigger the release
-   workflows.
-2. **Clean Repository**: Ensure your local repository has no uncommitted
-   changes.
-3. **Pending changelog entries**: Each user-facing PR should have added a
-   YAML fragment under `go/.chloggen/` (for Go changes) or
-   `rust/otap-dataflow/.chloggen/` (for Rust changes). The release workflow
-   collapses these into the appropriate CHANGELOG at release time.
+- The `release` GitHub environment requires approval from the designated
+  maintainers and permits deployments from `main`.
+- Each published Rust crate trusts `.github/workflows/push-release.yml`, the
+  `release` environment, and this repository for crates.io trusted publishing.
+- User-facing changes add a YAML fragment to the component's `.chloggen`
+  directory. Dependency-bot entries are generated during release preparation.
 
-## Changelog management
+Do not add a long-lived crates.io token. Push Release obtains a short-lived
+token through GitHub OIDC after environment approval.
 
-Contributors do **not** edit `go/CHANGELOG.md` or
-`rust/otap-dataflow/CHANGELOG.md` directly. Instead, each PR adds a YAML
-fragment to the corresponding `.chloggen/` directory by copying
-`TEMPLATE.yaml` to a new file (see the README in each directory). The
-`changelog` workflow enforces this on PRs that target `main`.
+## Automatic version selection
 
-At release time, the **Prepare Release** workflow runs `make chlog-update
-VERSION=v<version>`, which:
+Prepare Release calculates the next version from pending chloggen entries.
 
-- Renders all pending entries from `go/.chloggen/*.yaml` into
-  `go/CHANGELOG.md` under a new `## v<version>` heading.
-- Renders all pending entries from `rust/otap-dataflow/.chloggen/*.yaml`
-  into `rust/otap-dataflow/CHANGELOG.md` under a new `## v<version>`
-  heading.
-- Deletes the consumed `.yaml` entry files.
+| Changelog entry | Version impact |
+| --- | --- |
+| `bug_fix` | Patch |
+| `enhancement` with `component: dependencies` | Patch |
+| Other `enhancement` | Minor |
+| `new_component` | Minor |
+| `deprecation` | Minor |
+| `breaking` | Minor while the project is pre-1.0 |
 
-You can preview what the next release will look like locally:
+The highest pending impact wins:
 
-```bash
-make chlog-install
-make chlog-preview
+```text
+0.59.0 + patch changes -> 0.59.1
+0.59.3 + minor change  -> 0.60.0
 ```
 
-## Release Process
+There is no manual downgrade. If no selected component has pending entries,
+Prepare Release exits without opening a pull request.
 
-### Step 1: Confirm pending changelog entries
+## Scheduled releases
 
-1. Inspect `go/.chloggen/` and `rust/otap-dataflow/.chloggen/` and confirm
-   the pending entries describe the changes you want to release.
-2. Optionally run `make chlog-preview` locally for a rendered view.
-3. Commit any final changes to the `main` branch.
+Prepare Release runs for both components early Monday. Go and Rust are
+calculated independently, and the scheduled run is not a dry run:
 
-### Step 2: Run Prepare Release Workflow
+1. Generate pending dependency-bot changelog entries for each component.
+2. Calculate the next Go and Rust versions independently.
+3. Exit if neither component has pending entries.
+4. Render and consume entries only for components with changes.
+5. For a Rust release, bump the workspace versions, regenerate `Cargo.lock`,
+   and run `cargo xtask crates-publish check`.
+6. Commit `.github/release-plan.json` with the reviewed release metadata.
+7. Open one release pull request for the components that have changes.
 
-1. Go to the [Actions tab](https://github.com/open-telemetry/otel-arrow/actions)
-   in the GitHub repository.
-2. Select the "Prepare Release" workflow.
-3. Click "Run workflow".
-4. Fill in the required inputs:
-   - **Version**: The new version number (e.g., `0.48.0`).
-   - **Dry run**: Check this box to preview changes without making them.
+The fixed Monday schedule does not move after an urgent release. A later
+scheduled run omits an unchanged component and exits if neither component has
+additional entries.
 
-### Step 3: Review Dry Run (Recommended)
+Preparation also refuses to start while component tags or published GitHub
+releases from the previous plan are missing. Approve or recover the pending
+Push Release before preparing another train.
 
-Before making actual changes, run the workflow in dry-run mode:
+## Manual and urgent preparation
 
-1. Set "Dry run mode" to `true`.
-2. Review the output to ensure all planned changes are correct.
-3. Verify that the version increment makes sense.
-4. Check the rendered release-notes preview (with `## Go` and `## Rust`
-   sections).
+Run **Prepare Release** from the Actions tab and choose:
 
-### Step 4: Execute Release Preparation
+- `rust`
+- `go`
+- `both`
 
-1. Run the workflow again with "Dry run mode" set to `false`.
-2. The workflow will:
-   - Validate the version format and increment.
-   - Verify that the merge queue is empty and that `main` does not change
-     while the release contents are generated.
-   - Auto-generate umbrella chloggen entries summarizing renovate[bot]
-     and dependabot[bot] PRs merged since the last release tag (one per
-     tree, skipped if none).
-   - Render pending chloggen entries into `go/CHANGELOG.md` and
-     `rust/otap-dataflow/CHANGELOG.md`, deleting the consumed `.yaml`
-     entries.
-   - Bump the Rust workspace + root package versions in
-     `rust/otap-dataflow/Cargo.toml`.
-   - Create a release branch (`otelbot/release-vX.Y.Z`) and open a pull
-     request.
+For `both`, Go and Rust calculate their versions independently and share one
+release pull request.
 
-### Step 5: Review and Merge PR
+Use a dry run to preview the calculated versions, release plan, and notes.
+Set dry run to false to create or update the release pull request.
 
-1. Review the automatically created pull request.
-2. Verify that:
-   - Both `go/CHANGELOG.md` and `rust/otap-dataflow/CHANGELOG.md` render
-     the expected entries.
-   - `rust/otap-dataflow/Cargo.toml` reflects the new version.
-3. Ensure all CI checks pass.
-4. Merge the pull request. While it is open, the required `changelog` check
-   blocks every other pull request from merging.
+Use the same manual dispatch immediately after merging a security or other
+urgent fix. Urgency changes when the train leaves, not its versioning rules:
 
-### Step 6: Run Push Release Workflow
+- Only bug fixes and dependency updates pending: patch release.
+- Any feature, deprecation, or breaking entry pending: minor release.
 
-1. Go to the [Actions tab](https://github.com/open-telemetry/otel-arrow/actions)
-   in the GitHub repository.
-2. Select the "Push Release" workflow.
-3. Click "Run workflow".
-4. Fill in the required inputs:
-   - **Version**: The same version number used in the prepare step
-     (e.g., `0.48.0`).
-   - **Dry run**: Check this box to preview what will happen.
+## Release pull request
 
-### Step 7: Review Push Release Dry Run (Recommended)
+The preparation PR contains:
 
-Before publishing the release, run the push workflow in dry-run mode:
+- the selected component changelog sections;
+- Rust workspace and lockfile updates when Rust is selected;
+- `.github/release-plan.json`;
+- a summary of selected targets, versions, and previous tags.
 
-1. Set "Dry run mode" to `true`.
-2. Review the output to ensure all git tags and release content look
-   correct.
+The release plan is the machine-readable contract between Prepare Release and
+Push Release. Review it like any other release artifact.
 
-### Step 8: Publish Release
+While a release PR is open, the changelog workflow pauses other merges. This
+keeps `main` stable until the release PR merges or closes.
 
-1. Run the push release workflow again with "Dry run mode" set to `false`.
-2. The workflow will:
-   - Resolve the merged `otelbot/release-vX.Y.Z` pull request and use its
-     merge commit as the release commit.
-   - Create git tags for the main release, the Go modules, and the Rust
-     workspace at that release commit.
-   - Publish the GitHub release with the combined changelog content.
+## Protected publication
 
-Changes merged into `main` after the release pull request are not included in
-these tags. Their `.chloggen/` entries remain pending and are rendered into the
-next release. Normal pull request merges resume after the release pull request
-merges, even if the tags have not been created yet.
+Merging a release PR changes `.github/release-plan.json`, which starts Push
+Release automatically from the new `main` commit.
 
-The following git tags are created:
+An unprotected validation job first requires:
 
-- `vX.Y.Z` - Main release tag.
-- `go/vX.Y.Z` - Go module tag (covers
-  `github.com/open-telemetry/otel-arrow/go`).
-- `rust/otap-dataflow/vX.Y.Z` - Rust workspace tag.
+- exactly one merged release PR for the plan's bot-owned release branch;
+- the `release` label;
+- a matching merge commit;
+- valid component versions and release impacts.
 
-## Supported Components
+Ordinary merges do not change the release plan and do not start publication.
 
-The release process handles:
+The publication job selects the protected `release` environment and waits for
+a maintainer to approve the deployment. Approval remains the authorization
+boundary even though the workflow starts automatically.
 
-**Go Modules:**
+After approval, Push Release:
 
-- `github.com/open-telemetry/otel-arrow/go`
+1. checks out the exact release PR merge commit;
+2. verifies the release plan, changelog headings, and Rust workspace version;
+3. validates existing component tags;
+4. preflights selected Rust crates before authentication;
+5. obtains a short-lived crates.io token when Rust is selected;
+6. publishes Rust crates in dependency order;
+7. creates and pushes the selected component tags;
+8. publishes one GitHub release per selected component.
 
-**Rust Workspace:**
+## Rust `pdata-views`
 
-- `rust/otap-dataflow/` (git-tag only; **not** published to crates.io
-  yet). Consumers wire the workspace directly via a git reference until
-  the Rust side is ready for end-user releases.
+`otel-arrow-dfe-pdata-views` remains independently versioned. Normal Rust
+releases preserve its current version. Select **Include pdata-views** only for
+a coordinated release after dependent crates and external consumers support
+the new version.
 
-## Troubleshooting
+## CVE detection and urgent handling
 
-### Common Issues
+The repository uses two complementary Rust dependency checks:
 
-#### "No `.chloggen/*.yaml` entry was added or modified in this PR"
+- Renovate OSV vulnerability alerts, labeled `area:security` and allowed to
+  run outside the normal dependency-update schedule.
+- `cargo deny check advisories`, run by Rust-CI on pull requests and configured
+  by `rust/otap-dataflow/deny.toml`.
+- `cargo audit`, run daily, on manual dispatch, and when
+  `rust/otap-dataflow/Cargo.toml` or `rust/otap-dataflow/Cargo.lock` changes on
+  `main`.
 
-- Copy `go/.chloggen/TEMPLATE.yaml` (for Go changes) or
-  `rust/otap-dataflow/.chloggen/TEMPLATE.yaml` (for Rust changes) to a new
-  `.yaml` file in the same directory, fill in the fields, and commit it.
-- If the PR truly doesn't need an entry (internal refactors, dev-only
-  dependency bumps, doc-only edits), include `chore` in the PR title or
-  apply the `chore` label.
+When a finding applies:
 
-#### "The CHANGELOG files were modified directly"
+1. Follow `SECURITY.md` for private reporting or coordinated disclosure.
+2. Assess whether the vulnerable code is reachable and which released crates
+   are affected.
+3. Prepare and review the remediation.
+4. Merge the fix to `main`.
+5. Manually dispatch Prepare Release for Rust without waiting for Monday.
+6. Review and merge the release PR.
+7. Approve the protected Push Release deployment.
+8. Verify the fixed versions on crates.io and the published GitHub release.
 
-- Revert the direct edit. Add a `.chloggen/*.yaml` entry instead.
+Detection does not publish automatically. Review and protected approval remain
+mandatory.
 
-#### "Version v<X.Y.Z> not found in go/CHANGELOG.md"
+## Dry runs
 
-- Ensure the **Prepare Release** workflow has run and its PR has merged
-  before running **Push Release**.
+Prepare Release dry runs calculate versions and render changes without pushing
+a branch.
 
-#### "Repository has uncommitted changes"
+Push Release retains a manual dry-run dispatch. It reads the current
+`.github/release-plan.json`, resolves its merged release PR, validates tags,
+and performs the Rust crates.io preflight without publishing.
 
-- Commit or stash any local changes before running the workflow.
+## Recovery
 
-#### "Version is not greater than last version"
+Push Release is designed to resume safely:
 
-- Ensure the new version follows semantic versioning and is greater than
-  the current version.
+- Existing crate versions are skipped only when their registry checksum
+  matches the package built from the release commit.
+- Existing tags are accepted only when they point to the release commit.
+- Existing GitHub releases are left unchanged.
 
-### Manual Recovery
+If publication fails after one or more Rust crates are uploaded:
 
-If the workflow fails partway through:
+1. Do not yank valid versions merely because later steps failed.
+2. Do not attempt to replace an existing crates.io version.
+3. Fix transient or workflow issues without changing the release commit.
+4. Manually dispatch Push Release from `main` with dry run disabled.
+5. Approve the protected environment deployment.
 
-1. Delete the release branch if it was created:
+If published contents are incorrect, prepare a new release. Use a patch version
+when the remediation is compatible; use a minor version for feature or
+compatibility changes.
 
-   ```bash
-   git push origin --delete otelbot/release-vX.Y.Z
-   ```
+## Adding a Rust crate
 
-2. Delete the draft release from the GitHub UI if it was created.
+Before adding a crate to the publisher allowlist:
 
-3. Fix the underlying issue and re-run the workflow.
+1. Verify its package contents and dependency graph with
+   `cargo xtask crates-publish check`.
+2. Perform the one-time crates.io bootstrap publication from the intended
+   release commit.
+3. Configure crates.io trusted publishing for:
+   - repository `open-telemetry/otel-arrow`;
+   - workflow `push-release.yml`;
+   - environment `release`.
+4. Add the crate to the explicit publication allowlist.
 
-### Emergency Release Process
-
-In case the automated workflow cannot be used, you can create a manual
-release:
-
-1. Render the pending chloggen entries locally:
-
-   ```bash
-   make chlog-install
-   make chlog-update VERSION=vX.Y.Z
-   ```
-
-2. Bump the Rust workspace versions:
-
-   ```bash
-   sed -i 's/^version = "[0-9]\+\.[0-9]\+\.[0-9]\+"/version = "X.Y.Z"/g' \
-     rust/otap-dataflow/Cargo.toml
-   ```
-
-3. Commit the changes, open and merge a PR.
-
-4. Create and push the release tags:
-
-   ```bash
-   git tag -a vX.Y.Z -m "Release vX.Y.Z"
-   git tag -a go/vX.Y.Z -m "Release go/vX.Y.Z"
-   git tag -a rust/otap-dataflow/vX.Y.Z \
-     -m "Release rust/otap-dataflow/vX.Y.Z"
-   git push origin vX.Y.Z go/vX.Y.Z \
-     rust/otap-dataflow/vX.Y.Z
-   ```
-
-5. Create a GitHub release manually.
-
-## Version Strategy
-
-- All Go components and the Rust workspace currently share a single
-  release version. Rust crates track the Go release version going
-  forward.
-- Versions follow [Semantic Versioning](https://semver.org/).
-- This project is pre-1.0; minor-version releases may include breaking
-  changes.
-- Pre-release versions are not currently supported through the automated
-  workflow.
-- Rust crates are **not** published to crates.io yet. The Rust release is
-  git-tag-only until the Rust side is ready for end-user releases.
+The allowlist remains the publication-policy boundary. Cargo metadata provides
+the dependency order and rejects unpublished path dependencies or cycles.

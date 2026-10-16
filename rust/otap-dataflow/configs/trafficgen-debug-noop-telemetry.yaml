@@ -16,14 +16,14 @@ engine:
               interval: 6s
               views:
                 - selector:
-                    scope_name: "receiver.traffic_generator"
-                    instrument_name: "logs.produced"
+                    scope_name: "node.output"
+                    instrument_name: "items"
                   stream:
                     name: "otlp.logs.produced.count"
                     description: "Count of logs produced"
                 - selector:
-                    scope_name: "node.consumer"
-                    instrument_name: "consumed.messages"
+                    scope_name: "node.input"
+                    instrument_name: "messages"
                   stream:
                     name: "node.messages.consumed.count"
                     description: "Count of messages consumed by each node"
@@ -39,6 +39,8 @@ groups:
     pipelines:
       main:
         policies:
+          telemetry:
+            runtime_metrics: detailed
           channel_capacity:
             control:
               node: 100

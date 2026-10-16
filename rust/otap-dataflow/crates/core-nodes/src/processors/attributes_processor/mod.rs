@@ -45,18 +45,24 @@ use linkme::distributed_slice;
 use otel_arrow_dfe_config::SignalType;
 use otel_arrow_dfe_config::error::Error as ConfigError;
 use otel_arrow_dfe_config::node::NodeUserConfig;
-use otel_arrow_dfe_engine::MessageSourceLocalEffectHandlerExtension;
 use otel_arrow_dfe_engine::config::ProcessorConfig;
 use otel_arrow_dfe_engine::context::PipelineContext;
+use otel_arrow_dfe_engine::control::NackMsg;
 use otel_arrow_dfe_engine::error::Error as EngineError;
 use otel_arrow_dfe_engine::local::processor as local;
 use otel_arrow_dfe_engine::message::Message;
 use otel_arrow_dfe_engine::node::NodeId;
 use otel_arrow_dfe_engine::process_duration::ComputeDuration;
 use otel_arrow_dfe_engine::processor::ProcessorWrapper;
-use otel_arrow_dfe_otap::{
-    OTAP_PROCESSOR_FACTORIES, opaque_string::OpaqueString, pdata::OtapPdata,
+use otel_arrow_dfe_engine::{
+    ConsumerEffectHandlerExtension, MessageSourceLocalEffectHandlerExtension,
 };
+use otel_arrow_dfe_otap::{
+    OTAP_PROCESSOR_FACTORIES,
+    opaque_string::OpaqueString,
+    pdata::{OtapPdata, PdataEffectHandlerExtension},
+};
+#[cfg(test)]
 use otel_arrow_dfe_pdata::TryIntoWithOptions;
 use otel_arrow_dfe_pdata::otap::transform::apply_attribute_transform;
 use otel_arrow_dfe_pdata::otap::{
@@ -419,10 +425,18 @@ impl local::Processor<OtapPdata> for AttributesProcessor {
                     return res;
                 }
 
-                let signal = pdata.signal_type();
-                let (context, payload) = pdata.into_parts();
-
-                let mut records: OtapArrowRecords = payload.try_into_with_default()?;
+                let arrow_pdata = match effect_handler.materialize_otap(pdata).await {
+                    Ok(arrow_pdata) => arrow_pdata,
+                    Err(error) => {
+                        let (error, pdata) = error.into_parts();
+                        effect_handler
+                            .notify_nack(NackMsg::new_permanent(error.to_string(), pdata))
+                            .await?;
+                        return Ok(());
+                    }
+                };
+                let signal = arrow_pdata.signal_type();
+                let (context, mut records) = arrow_pdata.into_parts();
 
                 // Apply transform across selected domains and record per-(action, domain) stats.
                 let result = effect_handler.timed(&self.compute_duration, || {
@@ -563,6 +577,7 @@ pub static ATTRIBUTES_PROCESSOR_FACTORY: otel_arrow_dfe_engine::ProcessorFactory
              _capabilities: &otel_arrow_dfe_engine::capability::registry::Capabilities| {
                 create_attributes_processor(pipeline_ctx, node, node_config, proc_cfg)
             },
+        context_declarations: None,
         wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
         validate_config: otel_arrow_dfe_config::validation::validate_typed_config::<Config>,
     };
@@ -598,6 +613,7 @@ mod tests {
     use otel_arrow_dfe_engine::message::Message;
     use otel_arrow_dfe_engine::testing::{node::test_node, processor::TestRuntime};
     use otel_arrow_dfe_otap::pdata::OtapPdata;
+    use otel_arrow_dfe_pdata::OtlpProtoBytes;
     use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::metric::Data;
     use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
         Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum,
@@ -608,7 +624,7 @@ mod tests {
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs, SeverityNumber},
         resource::v1::Resource,
     };
-    use otel_arrow_dfe_pdata::{OtlpProtoBytes, PayloadData};
+    use otel_arrow_dfe_pdata_codec::PayloadData;
     use otel_arrow_dfe_telemetry::registry::TelemetryRegistryHandle;
     use prost::Message as _;
     use serde_json::json;
@@ -1338,7 +1354,11 @@ mod tests {
         let input = ExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
                 scope_logs: vec![ScopeLogs {
-                    log_records: vec![LogRecord::build().finish(), LogRecord::build().finish()],
+                    log_records: vec![
+                        LogRecord::build().finish(),
+                        LogRecord::build().finish(),
+                        LogRecord::build().finish(),
+                    ],
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -1397,6 +1417,12 @@ mod tests {
                 let log_1 = &decoded.resource_logs[0].scope_logs[0].log_records[1];
                 assert_eq!(
                     log_1.attributes,
+                    vec![KeyValue::new("b", AnyValue::new_string("val"))]
+                );
+
+                let log_2 = &decoded.resource_logs[0].scope_logs[0].log_records[2];
+                assert_eq!(
+                    log_2.attributes,
                     vec![KeyValue::new("b", AnyValue::new_string("val"))]
                 );
             })
@@ -2237,7 +2263,7 @@ mod tests {
                 let first = out.into_iter().next().expect("one output").payload();
 
                 let otap_batch = match first.into_data() {
-                    PayloadData::OtapArrowRecords(otap_batch) => otap_batch,
+                    PayloadData::OtapRecords(otap_batch) => otap_batch,
                     _ => panic!("unexpected output payload type"),
                 };
 

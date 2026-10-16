@@ -16,9 +16,14 @@ use serde::{Deserialize, Serialize, ser::Serializer};
 use std::borrow::Cow;
 use std::hash::Hash;
 
+pub mod authorized_identity_policy;
 pub mod byte_units;
 /// Config URI providers for resolving configuration from file:, env:, or bare paths.
 pub mod config_provider;
+/// Context entry names.
+pub mod context;
+/// Declarative context entry policies.
+pub mod context_policy;
 pub mod conversion;
 pub mod engine;
 /// Environment variable substitution for raw config text.
@@ -53,6 +58,7 @@ pub use topic::{
 /// Validation helpers for node configuration.
 pub mod validation;
 
+pub use context::{ContextEntryName, ContextEntryRef};
 pub use conversion::ConversionOptions;
 
 /// Signal types
@@ -66,15 +72,29 @@ pub enum SignalType {
     Logs,
 }
 
-/// Signal formats
+/// Payload storage forms retained during the migration to pluggable pdata codecs.
+///
+/// `OtlpBytes` is still used by legacy OTLP producers and batching. It coexists
+/// with `Encoded` so consumers can migrate before receivers switch to codec-based
+/// admission. An `Encoded` payload can also contain OTLP; this enum identifies
+/// storage, not the codec that defines the bytes.
+///
+/// This differs from `PdataView`, the representation-independent inspection API:
+/// when the consumer's accepted encodings include OTLP, both legacy OTLP storage and encoded
+/// OTLP storage yield `PdataView::Encoded` borrowing the original protobuf bytes.
+/// Consumers should use the capability APIs instead of matching storage forms.
+///
+/// The OTLP activation step removes legacy storage and this enum after codec-aware
+/// batching and consumer migration are complete. `PdataFormat` then provides
+/// representation identity for native OTAP and codec-identified encoded payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SignalFormat {
     /// OTel-Arrow records
     OtapRecords,
-    /// OTLP protobuf bytes
+    /// Legacy OTLP protobuf storage, retained until the OTLP activation step.
     OtlpBytes,
-    // TODO: maybe add types not included in OtapPdata including
-    // OtlpProtoMessage, OtapArrowBytes, and possible opaque.
+    /// Independently encoded bytes identified by a registered pdata codec, including OTLP.
+    Encoded,
 }
 
 /// The id of a pipeline group.

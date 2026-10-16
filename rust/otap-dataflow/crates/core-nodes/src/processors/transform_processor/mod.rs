@@ -11,6 +11,29 @@
 //! still being developed.
 //!
 //! ToDo: Detect unsupported pipelines at config time instead of run time.
+//!
+//! # Ack/Nack behaviour
+//!
+//! Some transformations may split the batch into multiple outbound batches (notably when the
+//! `route_to` operator is used in the query). When this happens, a new context will be created for
+//! the outbound batches, and this component will subscribe to Acks/Nacks on these outbound
+//! contexts. Once all outbound contexts have been Ack'd or Nack'd, this component will then
+//! produce an Ack or Nack for the inbound context.
+//!
+//! The rules by which it creates this Ack/Nack for the inbound context are as follows:
+//!
+//! If all outbound contexts were Ack'd, this component will produce an Ack.
+//!
+//! Otherwise, (when at least one outbound context was NAck'd). The Nack reason will be the first
+//! error received from the Nack of any Nack'd outbound batch.
+//!
+//! This Nack will be non-permanent ONLY if all the outbound contexts were Nack'd with
+//! `permanent=false` (e.g. if all the downstream errors were transient). It has this behaviour to
+//! avoid a) having the data retried in the case of a permanent downstream error and b) replaying
+//! data that has already been Ack'd. This means *a transient downstream error will not necessarily
+//! cause the batch to be retried*, and it may be considered good practice to put any retry
+//! processors downstream of this component.
+//!
 
 otel_arrow_dfe_telemetry::otel_component_scope!(
     urn = TRANSFORM_PROCESSOR_URN,
@@ -20,35 +43,42 @@ otel_arrow_dfe_telemetry::otel_component_scope!(
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use data_engine_expressions::Expression;
-use data_engine_kql_parser::{KqlParser, Parser};
 use linkme::distributed_slice;
+
+use otel_arrow_contrib_data_engine_kql_parser::{KqlParser, Parser};
 use otel_arrow_dfe_config::{SignalType, error::Error as ConfigError, node::NodeUserConfig};
 use otel_arrow_dfe_engine::{
     ConsumerEffectHandlerExtension, Interests, MessageSourceLocalEffectHandlerExtension,
     ProcessorFactory, ProducerEffectHandlerExtension,
     config::ProcessorConfig,
     context::PipelineContext,
-    control::{AckMsg, NackMsg, NodeControlMsg},
+    control::{AckMsg, NackCause, NackMsg, NodeControlMsg},
     error::{Error as EngineError, ProcessorErrorKind},
     local::processor::{EffectHandler, Processor},
     message::Message,
     node::NodeId,
-    processor::{ProcessorRuntimeRequirements, ProcessorWrapper},
+    processor::{FlowMetricHook, ProcessorRuntimeRequirements, ProcessorWrapper},
 };
 use otel_arrow_dfe_otap::{
     OTAP_PROCESSOR_FACTORIES,
-    accessory::{context::split_contexts::Contexts, slots::Key},
-    pdata::{Context, OtapPdata},
+    accessory::{
+        context::split_contexts::{Contexts, OutboundError},
+        slots::Key,
+    },
+    pdata::{OtapPdata, PdataDelivery, PdataEffectHandlerExtension},
 };
+#[cfg(test)]
 use otel_arrow_dfe_pdata::TryIntoWithOptions;
 use otel_arrow_dfe_pdata::{
-    OtapArrowRecords, OtapPayload, PayloadData, otap::transform::sanitize::sanitize_otap_batch,
+    OtapArrowRecords, OtapPayloadHelpers, otap::transform::sanitize::sanitize_otap_batch,
 };
+use otel_arrow_dfe_pdata_codec::OtapPayload;
+#[cfg(test)]
+use otel_arrow_dfe_pdata_codec::PayloadData;
 use otel_arrow_dfe_query_engine::{
     parser::default_parser_options,
     pipeline::{
-        Pipeline, PipelineOptions,
+        Pipeline, PipelineOptions, SignalContext, SignalKind,
         routing::RouterExtType,
         state::{ExecutionCounters, ExecutionState},
     },
@@ -79,7 +109,6 @@ pub struct TransformProcessor {
 }
 
 struct Transform {
-    signal_scope: SignalScope,
     pipeline: Pipeline,
 }
 
@@ -92,68 +121,6 @@ struct TransformOperationError {
 impl TransformOperationError {
     const fn new(error_type: TransformErrorType, error: EngineError) -> Self {
         Self { error_type, error }
-    }
-}
-
-/// Identifier for which signal types the transformation pipeline should be applied.
-enum SignalScope {
-    // Apply transformation to all signal types
-    All,
-
-    // Apply transformation to telemetry of one particular signal type
-    Signal(SignalType),
-}
-
-impl SignalScope {
-    fn try_from_kql_query(query: &str) -> Result<Self, ConfigError> {
-        // Current logic looks at the start of the pipeline and expects it to be in a form like
-        // "logs | ..." or "traces | ...", etc.
-        let query = query.trim_start();
-        Ok(if query.starts_with("logs") {
-            Self::Signal(SignalType::Logs)
-        } else if query.starts_with("traces") {
-            Self::Signal(SignalType::Traces)
-        } else if query.starts_with("metrics") {
-            Self::Signal(SignalType::Metrics)
-        } else if query.starts_with("signal") {
-            Self::All
-        } else {
-            return Err(ConfigError::InvalidUserConfig {
-                error: "could not determine signal type from query".into(),
-            });
-        })
-    }
-
-    fn try_from_opl_query(query: &str) -> Result<Self, ConfigError> {
-        // Current logic looks at the start of the pipeline and expects it to be in a form like
-        // "logs | ..." or "traces | ...", etc.
-        //
-        // The OPL Parser will inspect the source during parsing and if it sees the source is the
-        // plural form of some concrete metric type (gauges, sums, histograms, etc.), it creates a
-        // query plan that will select for processing only these batch types and only rows having
-        // the specified metric type. All other batches / rows are treated as passthrough. This is
-        // why for OPL only we allow these identifiers to the query source
-        //
-        let query = query.trim_start();
-        Ok(if query.starts_with("logs") {
-            Self::Signal(SignalType::Logs)
-        } else if query.starts_with("traces") {
-            Self::Signal(SignalType::Traces)
-        } else if query.starts_with("metrics")
-            || query.starts_with("gauges")
-            || query.starts_with("sums")
-            || query.starts_with("histograms")
-            || query.starts_with("exponential_histograms")
-            || query.starts_with("summaries")
-        {
-            Self::Signal(SignalType::Metrics)
-        } else if query.starts_with("signal") {
-            Self::All
-        } else {
-            return Err(ConfigError::InvalidUserConfig {
-                error: "could not determine signal type from query".into(),
-            });
-        })
     }
 }
 
@@ -174,8 +141,10 @@ impl TransformProcessor {
         };
         let parser_options = default_parser_options();
 
-        let pipeline_options = PipelineOptions {
-            filter_attribute_keys_case_sensitive: config.filter_attribute_keys_case_sensitive,
+        let filter_attribute_keys_case_sensitive = config.filter_attribute_keys_case_sensitive;
+
+        let map_pipeline_err = |e| ConfigError::InvalidUserConfig {
+            error: format!("Could not create pipeline: {e}"),
         };
 
         let (transforms, language) = match &config.query {
@@ -183,31 +152,27 @@ impl TransformProcessor {
                 let pipeline_expr = KqlParser::parse_with_options(query, parser_options)
                     .map_err(map_parser_err)?
                     .pipeline;
-                let signal_scope = SignalScope::try_from_kql_query(
-                    pipeline_expr.get_query_slice(pipeline_expr.get_query_location()),
-                )?;
-                (
-                    vec![Transform {
-                        pipeline: Pipeline::new_with_options(pipeline_expr, pipeline_options),
-                        signal_scope,
-                    }],
-                    TransformLanguage::Kql,
-                )
+                let signal_context =
+                    SignalContext::try_infer(&pipeline_expr).map_err(map_pipeline_err)?;
+                let options = PipelineOptions {
+                    signal_context,
+                    filter_attribute_keys_case_sensitive,
+                };
+                let pipeline = Pipeline::new_with_options(pipeline_expr, options);
+                (vec![Transform { pipeline }], TransformLanguage::Kql)
             }
             Query::OplQuery(query) => {
                 let pipeline_expr = OplParser::parse_with_options(query, parser_options)
                     .map_err(map_parser_err)?
                     .pipeline;
-                let signal_scope = SignalScope::try_from_opl_query(
-                    pipeline_expr.get_query_slice(pipeline_expr.get_query_location()),
-                )?;
-                (
-                    vec![Transform {
-                        pipeline: Pipeline::new_with_options(pipeline_expr, pipeline_options),
-                        signal_scope,
-                    }],
-                    TransformLanguage::Opl,
-                )
+                let signal_context =
+                    SignalContext::try_infer(&pipeline_expr).map_err(map_pipeline_err)?;
+                let options = PipelineOptions {
+                    signal_context,
+                    filter_attribute_keys_case_sensitive,
+                };
+                let pipeline = Pipeline::new_with_options(pipeline_expr, options);
+                (vec![Transform { pipeline }], TransformLanguage::Opl)
             }
             Query::Ottl(ottl_config) => {
                 let mut transforms = Vec::new();
@@ -218,12 +183,12 @@ impl TransformProcessor {
                                 .map_err(map_parser_err)?
                                 .pipeline;
 
+                        let pipeline_options = PipelineOptions {
+                            filter_attribute_keys_case_sensitive,
+                            signal_context: SignalContext::Single(SignalKind::Logs),
+                        };
                         transforms.push(Transform {
-                            pipeline: Pipeline::new_with_options(
-                                pipeline_expr,
-                                pipeline_options.clone(),
-                            ),
-                            signal_scope: SignalScope::Signal(SignalType::Logs),
+                            pipeline: Pipeline::new_with_options(pipeline_expr, pipeline_options),
                         })
                     }
                 }
@@ -252,7 +217,7 @@ impl TransformProcessor {
     /// while managing subscriptions and context
     async fn handle_exec_result(
         &mut self,
-        inbound_context: Context,
+        delivery: PdataDelivery,
         signal: SignalType,
         pipeline_result: Result<OtapArrowRecords, TransformOperationError>,
         counters: ExecutionCounters,
@@ -290,35 +255,87 @@ impl TransformProcessor {
         effect_handler.record_flow_dropped_items(signal, counters.filtered as u64);
 
         if self.sanitize_results {
-            sanitize_otap_batch(&mut default_otap_batch);
+            sanitize_otap_batch(&mut default_otap_batch).map_err(|error| {
+                router_impl.routed.clear();
+                TransformOperationError::new(TransformErrorType::Sanitization, error.into())
+            })?;
         }
 
-        // TODO - there's probably some optimization we can make below where if there's only one
-        // non-empty batch to be output, we don't need to change any contexts or subscriptions
+        // Empty named outputs must not consume downstream capacity or participate
+        // in the inbound request's ACK/NACK completion count.
+        router_impl
+            .routed
+            .retain(|(_, routed_batch)| !routed_batch.is_empty());
+        let default_has_data = !default_otap_batch.is_empty();
 
+        // With no named outputs, preserve the direct-context fast path. A fully
+        // empty transform result instead completes the original request locally.
         if router_impl.routed.is_empty() {
-            // there were no other record batches that were maybe split off this batch to be
-            // routed somewhere else, so we don't need to juggle any inbound/outbound contexts
-            // and we can just handle the batch normally.
-            let pdata = OtapPdata::new(inbound_context, default_otap_batch.into());
-            effect_handler
-                .send_message_with_source_node(pdata)
-                .await
-                .map_err(|error| {
-                    TransformOperationError::new(TransformErrorType::OutputSend, error.into())
-                })?;
+            let mut pdata = delivery.with_payload(default_otap_batch.into());
+            if default_has_data {
+                effect_handler
+                    .send_message_with_source_node(pdata)
+                    .await
+                    .map_err(|error| {
+                        TransformOperationError::new(TransformErrorType::OutputSend, error.into())
+                    })?;
+            } else {
+                // Report successful processing with no emitted output, then unwind
+                // the original context so upstream receives its ACK.
+                pdata.complete_processor_without_output(effect_handler);
+                effect_handler
+                    .notify_ack(AckMsg::new(pdata))
+                    .await
+                    .map_err(|error| {
+                        TransformOperationError::new(TransformErrorType::OutputSend, error)
+                    })?;
+            }
             return Ok(());
         }
 
+        // Validate every route and sanitize its output before emitting anything or allocating
+        // completion state, so a failure cannot leave a partially dispatched request.
+        let mut routed_outputs = Vec::with_capacity(router_impl.routed.len());
+        for (route_name, mut otap_batch) in router_impl.routed.drain(..) {
+            let port_name = effect_handler
+                .connected_ports()
+                .iter()
+                .find(|p| p.as_ref() == route_name.as_str())
+                .ok_or_else(|| {
+                    TransformOperationError::new(
+                        TransformErrorType::RouteNotConfigured,
+                        EngineError::ProcessorError {
+                            processor: effect_handler.processor_id(),
+                            kind: ProcessorErrorKind::Transport,
+                            error: "Routing error:".into(),
+                            source_detail: format!(
+                                "output port name {} not configured",
+                                route_name
+                            ),
+                        },
+                    )
+                })?
+                .clone();
+            if self.sanitize_results {
+                sanitize_otap_batch(&mut otap_batch).map_err(|error| {
+                    TransformOperationError::new(TransformErrorType::Sanitization, error.into())
+                })?;
+            }
+            routed_outputs.push((port_name, otap_batch));
+        }
+
+        // TODO: When the default output is empty and exactly one routed output
+        // remains, reuse the inbound context instead of allocating completion state.
+
         // Must be built before the context is moved into the slot map below. Holds no
         // frames, so cloning it per outbound batch is cheap.
-        let outbound_context = inbound_context.clone_detached();
+        let outbound_context = delivery.context().clone_detached();
 
         // keep error reason if there was an error, so we can send it to upstream in Nack once
         // all routed outbound batches have been Ack/Nack'd
         let inbound_ctx_key = self
             .contexts
-            .insert_inbound(inbound_context, None)
+            .insert_inbound(delivery, None)
             .ok_or_else(|| {
                 TransformOperationError::new(
                     TransformErrorType::InboundCapacity,
@@ -330,91 +347,21 @@ impl TransformProcessor {
                     },
                 )
             })?;
+        // If the default output is empty, the first named output becomes the
+        // request's first completion dependency.
+        let mut has_registered_outbound = false;
 
-        // send the output of the pipeline to the default output port while juggling the context for
-        // the output of the pipeline. We need to do this b/c we'll be emitting this batch, plus
-        // any routed batches, and we don't want to Ack the inbound context until we receive Acks
-        // from all downstream batches (including this result)
-        let mut pdata = OtapPdata::new(outbound_context.clone(), default_otap_batch.into());
-        let outbound_key = self
-            .contexts
-            .insert_outbound(inbound_ctx_key)
-            .ok_or_else(|| {
-                // if we can't emit the default batch, we won't be able to route any of the
-                // routed batches, so clear them to ensure they're not stuck in the router's
-                // buffer
-                router_impl.routed.clear();
-
-                // clear the inbound slot we allocated above as we haven't emitted anything
-                // that would eventually get Ack/Nack'd to clear it later
-                self.contexts.clear_inbound(inbound_ctx_key);
-
-                TransformOperationError::new(
-                    TransformErrorType::OutboundCapacity,
-                    EngineError::ProcessorError {
-                        processor: effect_handler.processor_id(),
-                        kind: ProcessorErrorKind::Other,
-                        error: "outbound slots not available".into(),
-                        source_detail: "".into(),
-                    },
-                )
-            })?;
-        if !outbound_key.is_null() {
-            effect_handler.subscribe_to(
-                Interests::NACKS | Interests::ACKS,
-                outbound_key.into(),
-                &mut pdata,
-            );
-        }
-        effect_handler
-            .send_message_with_source_node(pdata)
-            .await
-            .map_err(|error| {
-                TransformOperationError::new(TransformErrorType::OutputSend, error.into())
-            })?;
-
-        // handle any batches that need to be forwarded to a specific output port thanks to invocation
-        // of a "route_to" operator call
-        for (route_name, mut otap_batch) in router_impl.routed.drain(..) {
-            // Find the port name that matches the route name.
-            let port_name = effect_handler
-                .connected_ports()
-                .iter()
-                .find(|p| p.as_ref() == route_name.as_str())
-                .ok_or_else(|| {
-                    TransformOperationError::new(
-                        TransformErrorType::RouteNotConfigured,
-                        EngineError::ProcessorError {
-                            processor: effect_handler.processor_id(),
-                            kind: ProcessorErrorKind::Transport,
-                            error: "Routing error: ".into(),
-                            source_detail: format!(
-                                "output port name {} not configured",
-                                route_name
-                            ),
-                        },
-                    )
-                })?
-                .clone();
-
-            if self.sanitize_results {
-                sanitize_otap_batch(&mut otap_batch);
-            }
-
-            // setup the pdata with the new outbound context
-            let payload = OtapPayload::from(otap_batch);
-            let mut pdata = OtapPdata::new(outbound_context.clone(), payload);
+        // Track the default output only when it contains data. Routed outputs still share
+        // the inbound context, so their ACK/NACKs determine completion when this is empty.
+        if default_has_data {
+            let mut pdata = OtapPdata::new(outbound_context.clone(), default_otap_batch.into());
             let outbound_key = self
                 .contexts
                 .insert_outbound(inbound_ctx_key)
                 .ok_or_else(|| {
-                    // the message could not be routed b/c there wasn't room for its context in
-                    // the outbound slot map. set error on the inbound key to ensure we eventually
-                    // nack the inbound request
-                    self.contexts.set_failed_inbound(
-                        inbound_ctx_key,
-                        "outbound slots were not available".into(),
-                    );
+                    // clear the inbound slot we allocated above as we haven't emitted anything
+                    // that would eventually get Ack/Nack'd to clear it later
+                    self.contexts.clear_inbound(inbound_ctx_key);
 
                     TransformOperationError::new(
                         TransformErrorType::OutboundCapacity,
@@ -426,6 +373,59 @@ impl TransformProcessor {
                         },
                     )
                 })?;
+            has_registered_outbound = true;
+            if !outbound_key.is_null() {
+                effect_handler.subscribe_to(
+                    Interests::NACKS | Interests::ACKS,
+                    outbound_key.into(),
+                    &mut pdata,
+                );
+            }
+            effect_handler
+                .send_message_with_source_node(pdata)
+                .await
+                .map_err(|error| {
+                    TransformOperationError::new(TransformErrorType::OutputSend, error.into())
+                })?;
+        }
+
+        // handle any batches that need to be forwarded to a specific output port thanks to invocation
+        // of a "route_to" operator call
+        for (port_name, otap_batch) in routed_outputs {
+            // setup the pdata with the new outbound context
+            let payload = OtapPayload::from(otap_batch);
+            let mut pdata = OtapPdata::new(outbound_context.clone(), payload);
+            let outbound_key = self
+                .contexts
+                .insert_outbound(inbound_ctx_key)
+                .ok_or_else(|| {
+                    if has_registered_outbound {
+                        // Earlier outputs will eventually close this inbound context;
+                        // record the partial-send failure so that closure sends a NACK.
+                        self.contexts.set_failed_inbound(
+                            inbound_ctx_key,
+                            OutboundError {
+                                reason: "outbound slots were not available".into(),
+                                cause: NackCause::RouteFull,
+                            },
+                        );
+                    } else {
+                        // No default or named output was registered, so nothing can
+                        // close an inbound context whose outbound count is still zero.
+                        self.contexts.clear_inbound(inbound_ctx_key);
+                    }
+
+                    TransformOperationError::new(
+                        TransformErrorType::OutboundCapacity,
+                        EngineError::ProcessorError {
+                            processor: effect_handler.processor_id(),
+                            kind: ProcessorErrorKind::Other,
+                            error: "outbound slots not available".into(),
+                            source_detail: "".into(),
+                        },
+                    )
+                })?;
+            has_registered_outbound = true;
             if !outbound_key.is_null() {
                 effect_handler.subscribe_to(
                     Interests::NACKS | Interests::ACKS,
@@ -450,17 +450,21 @@ impl TransformProcessor {
     async fn handle_ack_nack_inbound(
         &mut self,
         outbound_key: Key,
-        signal_type: SignalType,
         effect_handler: &mut EffectHandler<OtapPdata>,
     ) -> Result<(), EngineError> {
         // clear the outbound context.
         if let Some(inbound) = self.contexts.clear_outbound(outbound_key) {
             // if here, we have cleared the final outbound context for some inbound batch,
             // which means we can now Ack or Nack the inbound context
-            let (context, error_reason) = inbound;
-            let pdata = OtapPdata::new(context, OtapPayload::empty(signal_type));
-            if let Some(error) = error_reason {
-                effect_handler.notify_nack(NackMsg::new(error, pdata)).await
+            let pdata = inbound.delivery.into_pdata();
+            if let Some(error) = inbound.error {
+                let nack_msg = if inbound.outbound_all_transient_errors {
+                    // this constructor creates a non-permanent Nack
+                    NackMsg::new_with_cause(error.reason, pdata, error.cause)
+                } else {
+                    NackMsg::new_permanent_with_cause(error.reason, pdata, error.cause)
+                };
+                effect_handler.notify_nack(nack_msg).await
             } else {
                 effect_handler.notify_ack(AckMsg::new(pdata)).await
             }
@@ -494,6 +498,7 @@ fn create_transform_processor(
 pub static TRANSFORM_PROCESSOR_FACTORY: ProcessorFactory<OtapPdata> = ProcessorFactory {
     name: TRANSFORM_PROCESSOR_URN,
     create: create_transform_processor,
+    context_declarations: None,
     wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
     validate_config: otel_arrow_dfe_config::validation::validate_typed_config::<Config>,
 };
@@ -524,168 +529,99 @@ impl Processor<OtapPdata> for TransformProcessor {
                     }
                 }
                 NodeControlMsg::Ack(ack_message) => {
-                    self.handle_ack_nack_inbound(
-                        ack_message.unwind.route.calldata.try_into()?,
-                        ack_message.accepted.signal_type(),
-                        effect_handler,
-                    )
-                    .await?;
+                    let outbound_key: Key = ack_message.unwind.route.calldata.try_into()?;
+                    self.contexts
+                        .set_outbound_all_transient_errors(outbound_key, false);
+                    self.handle_ack_nack_inbound(outbound_key, effect_handler)
+                        .await?;
                 }
                 NodeControlMsg::Nack(nack_message) => {
                     let outbound_key: Key = nack_message.unwind.route.calldata.try_into()?;
-                    self.contexts
-                        .set_failed_outbound(outbound_key, nack_message.reason);
-                    self.handle_ack_nack_inbound(
+                    self.contexts.set_failed_outbound(
                         outbound_key,
-                        nack_message.refused.signal_type(),
-                        effect_handler,
-                    )
-                    .await?;
+                        OutboundError {
+                            reason: nack_message.reason,
+                            cause: nack_message.cause,
+                        },
+                    );
+                    if nack_message.permanent {
+                        self.contexts
+                            .set_outbound_all_transient_errors(outbound_key, false);
+                    }
+                    self.handle_ack_nack_inbound(outbound_key, effect_handler)
+                        .await?;
                 }
                 _ => {
                     // other types of control messages are ignored for now
                 }
             },
             Message::PData(pdata) => {
-                let (context, payload) = pdata.into_parts();
-                let pdata_signal_type = payload.signal_type();
-                let mut payload = Some(payload);
-                let mut transformed = false;
-                let mut transform_error = None;
-
-                // Reset the engine's record-removal counters so that, after the
-                // transform loop, they reflect only the drops caused by this
-                // batch.
+                let signal = pdata.signal_type();
                 self.execution_state.reset_counters();
-
-                // Execute all transforms. We skip transforms where the batch's signal type is not
-                // selected by the signal scope, and lazily convert the pdata payload to OTAP
-                // if/when we find a transform to apply. If any transform error occurs, break early
-                // and set transform_error to `Some`.
-                //
-                // State at the end of this loop:
-                // - Either payload or `transform_error` will be `Some`
-                // - If we applied any transform then:
-                //   - `transformed` will be set to `true`
-                //   - if payload is `Some` then contained payload variant will be OtelArrowRecords
-                for transform in &mut self.transforms {
-                    let should_process = match &transform.signal_scope {
-                        SignalScope::All => true,
-                        SignalScope::Signal(scope_signal_type) => {
-                            pdata_signal_type == *scope_signal_type
-                        }
-                    };
-
-                    if !should_process {
-                        // skip applying this transform as it does not select the signal type
-                        continue;
+                let Some(first) = self
+                    .transforms
+                    .iter()
+                    .position(|t| t.pipeline.accepts_signal_type(signal))
+                else {
+                    // Do not snapshot or decode messages that no transform selects.
+                    effect_handler.send_message_with_source_node(pdata).await?;
+                    return Ok(());
+                };
+                let (delivery, records) = match effect_handler.prepare_otap_work(pdata).await {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.metrics
+                            .record_failure(signal, TransformErrorType::PayloadConversion);
+                        let (error, pdata) = error.into_parts();
+                        effect_handler
+                            .notify_nack(NackMsg::new_permanent(error.to_string(), pdata))
+                            .await?;
+                        return Ok(());
                     }
-                    transformed = true;
+                };
 
-                    // convert payload to OTAP & remove delta encoded IDs.
-                    // safety: we know payload will have been initialized to Some either, before
-                    // entering the loop, or during the previous iteration.
-                    let conversion_result: Result<OtapArrowRecords, _> = payload
-                        .take()
-                        .expect("payload initialized")
-                        .try_into_with_default();
-                    let mut otap_batch = match conversion_result {
-                        Ok(otap_batch) => otap_batch,
-                        Err(error) => {
-                            transform_error = Some(TransformOperationError::new(
-                                TransformErrorType::PayloadConversion,
-                                error.into(),
-                            ));
-                            break;
+                let result = async {
+                    let mut records = records;
+                    for transform in &mut self.transforms[first..] {
+                        if !transform.pipeline.accepts_signal_type(signal) {
+                            continue;
                         }
-                    };
-                    if let Err(error) = otap_batch.decode_transport_optimized_ids() {
-                        transform_error = Some(TransformOperationError::new(
-                            TransformErrorType::IdDecode,
-                            error.into(),
-                        ));
-                        break;
+                        // Normalization remains explicit at each algorithm boundary.
+                        records.decode_transport_optimized_ids().map_err(|error| {
+                            TransformOperationError::new(TransformErrorType::IdDecode, error.into())
+                        })?;
+                        records = transform
+                            .pipeline
+                            .execute_with_state(records, &mut self.execution_state)
+                            .await
+                            .map_err(|error| {
+                                TransformOperationError::new(
+                                    TransformErrorType::QueryExecution,
+                                    EngineError::ProcessorError {
+                                        processor: effect_handler.processor_id(),
+                                        kind: ProcessorErrorKind::Other,
+                                        error: format!(
+                                            "Error executing query engine pipeline {error}"
+                                        ),
+                                        source_detail: error.to_string(),
+                                    },
+                                )
+                            })?;
                     }
-
-                    let result = transform
-                        .pipeline
-                        .execute_with_state(otap_batch, &mut self.execution_state)
-                        .await
-                        .map_err(|e| {
-                            TransformOperationError::new(
-                                TransformErrorType::QueryExecution,
-                                EngineError::ProcessorError {
-                                    processor: effect_handler.processor_id(),
-                                    kind: ProcessorErrorKind::Other,
-                                    error: format!("Error executing query engine pipeline {e}"),
-                                    source_detail: e.to_string(),
-                                },
-                            )
-                        });
-
-                    match result {
-                        Ok(next_result) => {
-                            // initialize payload for the next loop iteration
-                            payload = Some(OtapPayload::from(next_result));
-                        }
-                        Err(e) => {
-                            transform_error = Some(e);
-                            break;
-                        }
-                    }
+                    Ok(records)
                 }
-
-                if transformed {
-                    let result = match transform_error {
-                        Some(e) => Err(e),
-                        None => {
-                            // safety: since error is `None`, we know payload must be `Some` based
-                            // on the logic in the loop above, so it is safe to expect here
-                            match payload
-                                .take()
-                                .expect("payload option initialized")
-                                .into_data()
-                            {
-                                PayloadData::OtapArrowRecords(otap_batch) => Ok(otap_batch),
-                                _ => {
-                                    // safety: if any transform applied then we'll have converted
-                                    // the payload the OTAP, so we know here that it must be this
-                                    // variant of OtapPayload
-                                    unreachable!("expected OTAP payload variant")
-                                }
-                            }
-                        }
-                    };
-                    // Hand the engine's per-batch counters to the result handler,
-                    // which records the corresponding flow metrics.
-                    let counters = self.execution_state.counters();
-                    match self
-                        .handle_exec_result(
-                            context,
-                            pdata_signal_type,
-                            result,
-                            counters,
-                            effect_handler,
-                        )
-                        .await
-                    {
-                        Ok(()) => self.metrics.record_success(pdata_signal_type),
-                        Err(operation_error) => {
-                            self.metrics
-                                .record_failure(pdata_signal_type, operation_error.error_type);
-                            return Err(operation_error.error);
-                        }
+                .await;
+                let counters = self.execution_state.counters();
+                match self
+                    .handle_exec_result(delivery, signal, result, counters, effect_handler)
+                    .await
+                {
+                    Ok(()) => self.metrics.record_success(signal),
+                    Err(operation_error) => {
+                        self.metrics
+                            .record_failure(signal, operation_error.error_type);
+                        return Err(operation_error.error);
                     }
-                } else {
-                    // safety: payload is initialized to Some, and only modified if any transforms
-                    // are applied. In this location, we know no transforms were applied so we can
-                    // safely expect take here to return Some
-                    let payload = payload.take().expect("payload option initialized");
-
-                    // all transforms were skipped for this pdata, just forward the original payload
-                    effect_handler
-                        .send_message_with_source_node(OtapPdata::new(context, payload))
-                        .await?;
                 }
             }
         };
@@ -724,7 +660,6 @@ mod test {
     };
     use otel_arrow_dfe_pdata::{
         TryFromWithOptions,
-        otap::Logs,
         proto::{
             OtlpProtoMessage,
             opentelemetry::{
@@ -742,13 +677,18 @@ mod test {
         testing::round_trip::{otap_to_otlp, otlp_to_otap, to_logs_data, to_otap_logs},
     };
 
+    use otel_arrow_dfe_config::ContextEntryName;
+    use otel_arrow_dfe_config::transport_headers::{TransportHeader, TransportHeaders, ValueKind};
     use otel_arrow_dfe_otap::{
         pdata::{Context, OtapPdata},
         testing::{TestCallData, next_ack, next_nack},
-        transport_headers::{TransportHeader, TransportHeaders},
     };
     use otel_arrow_dfe_telemetry::registry::TelemetryRegistryHandle;
     use std::net::SocketAddr;
+
+    fn context_name(raw: &str) -> ContextEntryName {
+        ContextEntryName::try_from(raw).expect("valid test context entry name")
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     struct TransformMetricPoint {
@@ -837,16 +777,36 @@ mod test {
             .await
     }
 
-    /// Helper to send a Nack for a given context
+    /// Helper to send a non-permanent Nack for a given context
     async fn send_nack(
         ctx: &mut TestContext<OtapPdata>,
         context: Context,
         signal_type: SignalType,
         reason: &str,
+        cause: NackCause,
     ) -> Result<(), EngineError> {
-        let nack = next_nack(NackMsg::new(
+        let nack = next_nack(NackMsg::new_with_cause(
             reason,
             OtapPdata::new(context, OtapPayload::empty(signal_type)),
+            cause,
+        ));
+        let (_, nack) = nack.unwrap();
+        ctx.process(Message::Control(NodeControlMsg::Nack(nack)))
+            .await
+    }
+
+    /// Helper to send a permanent Nack for a given context
+    async fn send_permanent_nack(
+        ctx: &mut TestContext<OtapPdata>,
+        context: Context,
+        signal_type: SignalType,
+        reason: &str,
+        cause: NackCause,
+    ) -> Result<(), EngineError> {
+        let nack = next_nack(NackMsg::new_permanent_with_cause(
+            reason,
+            OtapPdata::new(context, OtapPayload::empty(signal_type)),
+            cause,
         ));
         let (_, nack) = nack.unwrap();
         ctx.process(Message::Control(NodeControlMsg::Nack(nack)))
@@ -1037,6 +997,90 @@ mod test {
                 assert!(points.iter().all(|point| point.field != "msgs.transformed"
                     && point.field != "msgs.transform.failed"));
             });
+    }
+
+    /// Scenario: An OPL transform filters every log from an input carrying an ACK subscriber.
+    /// Guarantees: The input is ACKed without forwarding empty PData downstream.
+    #[test]
+    fn test_fully_filtered_transform_completes_without_output() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let processor = try_create_with_config(
+            json!({
+                "opl_query": "logs | where false",
+                "skip_sanitize_result": true,
+            }),
+            &runtime,
+        )
+        .expect("created processor");
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(1);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().event_name("filtered").finish()]);
+                let pdata = create_pdata_with_subscriber(input, Interests::ACKS, 1, 999);
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(
+                    ctx.drain_pdata().await.is_empty(),
+                    "fully filtered transform output must not be forwarded"
+                );
+
+                match completion_rx.recv().await.expect("upstream completion") {
+                    PipelineCompletionMsg::DeliverAck { mut ack } => {
+                        assert_eq!(ack.accepted.num_items(), 0);
+                        assert_eq!(ack.accepted.signal_type(), SignalType::Logs);
+                    }
+                    other => panic!("expected DeliverAck, got {other:?}"),
+                }
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: An OPL transform filters every log before routing to a named output.
+    /// Guarantees: Empty default and routed batches are omitted and the input is ACKed locally.
+    #[test]
+    fn test_fully_filtered_routed_transform_completes_without_output() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let mut processor =
+            try_create_with_opl_query("logs | where false | route_to \"test_port\"", &runtime)
+                .expect("created processor");
+        let test_port_rx = set_pdata_sender("test_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(1);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().event_name("filtered").finish()]);
+                let pdata = create_pdata_with_subscriber(input, Interests::ACKS, 1, 999);
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(
+                    ctx.drain_pdata().await.is_empty(),
+                    "empty default output must not be forwarded"
+                );
+                assert!(
+                    test_port_rx.is_empty(),
+                    "empty routed output must not be forwarded"
+                );
+
+                match completion_rx.recv().await.expect("upstream completion") {
+                    PipelineCompletionMsg::DeliverAck { mut ack } => {
+                        assert_eq!(ack.accepted.num_items(), 0);
+                        assert_eq!(ack.accepted.signal_type(), SignalType::Logs);
+                    }
+                    other => panic!("expected DeliverAck, got {other:?}"),
+                }
+            })
+            .validate(|_ctx| async move {});
     }
 
     /// Scenario: An OPL query assigns an integer to a string field and fails during execution.
@@ -1399,8 +1443,9 @@ mod test {
         .expect("no process error")
     }
 
-    /// Scenario: A traces-scoped query receives one traces message and one metrics message.
-    /// Guarantees: Only the matching traces message produces a transform operation metric.
+    /// Scenario: A traces query receives native signals and opaque encoded metrics.
+    /// Guarantees: Skipped metrics retain their encoded bytes without decoding, and only
+    /// the matching traces message produces a transform operation metric.
     #[test]
     fn test_signal_scope() {
         // test ensure it will only operate on traces, but ignores other signals
@@ -1412,6 +1457,29 @@ mod test {
         runtime
             .set_processor(processor)
             .run_test(|mut ctx| async move {
+                use bytes::Bytes;
+                use otel_arrow_dfe_pdata_codec::{CodecService, PdataEncoding};
+
+                let services = CodecService::new().unwrap();
+                let codec = services.registry().resolve(&PdataEncoding::OTLP).unwrap();
+                // Invalid protobuf makes accidental decoding observable as a failure.
+                let bytes = Bytes::from_static(b"\x0a\xff\xff");
+                ctx.process(Message::PData(OtapPdata::new_default(
+                    codec
+                        .admit(SignalType::Metrics, bytes.clone())
+                        .unwrap()
+                        .into(),
+                )))
+                .await
+                .expect("skipped input must not decode");
+                let skipped = ctx.drain_pdata().await;
+                assert_eq!(skipped.len(), 1);
+                let view = skipped[0].payload_ref().encoded_view().unwrap();
+                assert_eq!(view.encoding(), &PdataEncoding::OTLP);
+                assert_eq!(view.signal_type(), SignalType::Metrics);
+                assert_eq!(view.bytes().as_ptr(), bytes.as_ptr());
+                assert_eq!(view.bytes(), bytes.as_ref());
+
                 send_one_traces_one_metrics_same_names(&mut ctx).await;
                 let mut processed_pdata = ctx
                     .drain_pdata()
@@ -1577,18 +1645,10 @@ mod test {
                     .await
                     .expect("no process error");
 
-                let out = ctx
-                    .drain_pdata()
-                    .await
-                    .into_iter()
-                    .map(OtapPdata::payload)
-                    .map(OtapArrowRecords::try_from_with_default)
-                    .map(Result::unwrap);
-                let result = out.into_iter().next().expect("one result");
-
-                // expect we got an empty batch:
-                assert_eq!(result, OtapArrowRecords::Logs(Logs::default()));
-                // TODO when we support Ack/Nack here assert on the context of this message
+                assert!(
+                    ctx.drain_pdata().await.is_empty(),
+                    "empty default output must not be forwarded"
+                );
 
                 let mut routed = Vec::new();
                 while let Ok(msg) = test_port_rx.try_recv() {
@@ -1597,7 +1657,7 @@ mod test {
                 assert_eq!(routed.len(), 1);
                 let (_context, payload) = routed.pop().unwrap().into_parts();
                 match payload.into_data() {
-                    PayloadData::OtapArrowRecords(result) => {
+                    PayloadData::OtapRecords(result) => {
                         assert_eq!(result, input)
                     }
                     _ => panic!("unexpected payload type"),
@@ -1605,6 +1665,268 @@ mod test {
                 // TODO when we support Ack/Nack here assert on routed context
             })
             .validate(|_ctx| async move {})
+    }
+
+    /// Scenario: An OPL transform moves every log to a named output.
+    /// Guarantees: The empty default output is omitted and the routed ACK completes the input.
+    #[test]
+    fn test_only_routed_output_controls_inbound_ack() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let mut processor = try_create_with_opl_query("logs | route_to \"test_port\"", &runtime)
+            .expect("created processor");
+        let test_port_rx = set_pdata_sender("test_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(1);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+                let pdata = create_pdata_with_subscriber(input, Interests::ACKS, 1, 999);
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(
+                    ctx.drain_pdata().await.is_empty(),
+                    "empty default output must not be forwarded"
+                );
+
+                let (routed_context, _) = test_port_rx
+                    .recv()
+                    .await
+                    .expect("non-empty routed output")
+                    .into_parts();
+                send_ack(&mut ctx, routed_context, SignalType::Logs)
+                    .await
+                    .expect("ack routed output");
+
+                match completion_rx.recv().await.expect("upstream completion") {
+                    PipelineCompletionMsg::DeliverAck { ack } => {
+                        let (node_id, _) = next_ack(ack).expect("expected upstream subscriber");
+                        assert_eq!(node_id, 999);
+                    }
+                    other => panic!("expected DeliverAck, got {other:?}"),
+                }
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: An OPL transform moves every log to a named output that is NACKed downstream.
+    /// Guarantees: The empty default output is omitted and the routed NACK completes the input.
+    #[test]
+    fn test_only_routed_output_controls_inbound_nack() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let mut processor = try_create_with_opl_query("logs | route_to \"test_port\"", &runtime)
+            .expect("created processor");
+        let test_port_rx = set_pdata_sender("test_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(1);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+                let pdata =
+                    create_pdata_with_subscriber(input, Interests::ACKS | Interests::NACKS, 1, 999);
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(
+                    ctx.drain_pdata().await.is_empty(),
+                    "empty default output must not be forwarded"
+                );
+
+                let (routed_context, _) = test_port_rx
+                    .recv()
+                    .await
+                    .expect("non-empty routed output")
+                    .into_parts();
+                send_nack(
+                    &mut ctx,
+                    routed_context,
+                    SignalType::Logs,
+                    "downstream routed error",
+                    NackCause::NodeShutdown,
+                )
+                .await
+                .expect("nack routed output");
+
+                match completion_rx.recv().await.expect("upstream completion") {
+                    PipelineCompletionMsg::DeliverNack { nack } => {
+                        let (node_id, nack) =
+                            next_nack(nack).expect("expected upstream subscriber");
+                        assert_eq!(node_id, 999);
+                        assert_eq!(nack.reason, "downstream routed error");
+                        assert_eq!(nack.cause, NackCause::NodeShutdown)
+                    }
+                    other => panic!("expected DeliverNack, got {other:?}"),
+                }
+                assert!(
+                    completion_rx.is_empty(),
+                    "upstream must be NACKed exactly once"
+                );
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: An OPL fork produces one empty named output and one non-empty named output.
+    /// Guarantees: Only the non-empty route participates in and completes upstream ACK tracking.
+    #[test]
+    fn test_mixed_empty_and_non_empty_routed_outputs() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let query = r#"logs |
+        fork {
+            where false |
+            route_to "empty_port"
+        }
+        {
+            route_to "data_port"
+        }
+        "#;
+        let mut processor = try_create_with_opl_query(query, &runtime).expect("created processor");
+        let empty_port_rx = set_pdata_sender("empty_port", &mut processor);
+        let data_port_rx = set_pdata_sender("data_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(1);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+                let pdata = create_pdata_with_subscriber(input, Interests::ACKS, 1, 999);
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(
+                    ctx.drain_pdata().await.is_empty(),
+                    "empty default output must not be forwarded"
+                );
+                assert!(
+                    empty_port_rx.is_empty(),
+                    "empty routed output must not be forwarded"
+                );
+
+                let (data_context, mut data_payload) = data_port_rx
+                    .recv()
+                    .await
+                    .expect("non-empty routed output")
+                    .into_parts();
+                assert_eq!(data_payload.num_items(), 1);
+                send_ack(&mut ctx, data_context, SignalType::Logs)
+                    .await
+                    .expect("ack non-empty routed output");
+
+                match completion_rx.recv().await.expect("upstream completion") {
+                    PipelineCompletionMsg::DeliverAck { ack } => {
+                        let (node_id, _) = next_ack(ack).expect("expected upstream subscriber");
+                        assert_eq!(node_id, 999);
+                    }
+                    other => panic!("expected DeliverAck, got {other:?}"),
+                }
+                assert!(
+                    completion_rx.is_empty(),
+                    "empty route must not add a completion dependency"
+                );
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: One input selects configured and unconfigured named output routes.
+    /// Guarantees: Route validation is atomic and a later valid routed input can still be ACKed.
+    #[test]
+    fn test_unconfigured_route_prevents_partial_send_and_context_leak() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let query = r#"logs
+            | if (severity_text == "ERROR") {
+                route_to "configured_port"
+            } else if (severity_text == "INFO") {
+                route_to "missing_port"
+            }"#;
+        let mut processor = try_create_with_config(
+            json!({
+                "opl_query": query,
+                "inbound_request_limit": 1,
+            }),
+            &runtime,
+        )
+        .expect("created processor");
+        let configured_port_rx = set_pdata_sender("configured_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(2);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let failing_input = to_otap_logs(create_log_records(&["ERROR", "INFO"]));
+                let failing_pdata = create_pdata_with_subscriber(
+                    failing_input,
+                    Interests::ACKS | Interests::NACKS,
+                    1,
+                    999,
+                );
+                let error = ctx
+                    .process(Message::PData(failing_pdata))
+                    .await
+                    .expect_err("unconfigured route must fail");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("output port name missing_port not configured")
+                );
+                assert!(
+                    ctx.drain_pdata().await.is_empty(),
+                    "default output must not be partially sent"
+                );
+                assert!(
+                    configured_port_rx.is_empty(),
+                    "configured route must not be partially sent"
+                );
+                assert!(
+                    completion_rx.is_empty(),
+                    "the processor error is completed by the runtime"
+                );
+
+                let valid_input =
+                    to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+                let valid_pdata =
+                    create_pdata_with_subscriber(valid_input, Interests::ACKS, 2, 999);
+                ctx.process(Message::PData(valid_pdata))
+                    .await
+                    .expect("failed request must not retain inbound capacity");
+
+                let (routed_context, _) = configured_port_rx
+                    .recv()
+                    .await
+                    .expect("configured routed output")
+                    .into_parts();
+                send_ack(&mut ctx, routed_context, SignalType::Logs)
+                    .await
+                    .expect("ack configured routed output");
+
+                match completion_rx.recv().await.expect("upstream completion") {
+                    PipelineCompletionMsg::DeliverAck { ack } => {
+                        let (node_id, _) = next_ack(ack).expect("expected upstream subscriber");
+                        assert_eq!(node_id, 999);
+                    }
+                    other => panic!("expected DeliverAck, got {other:?}"),
+                }
+            })
+            .validate(|_ctx| async move {});
     }
 
     #[test]
@@ -1797,7 +2119,7 @@ mod test {
                 assert_eq!(routed.len(), 1);
                 let (_context, payload) = routed.pop().unwrap().into_parts();
                 match payload.into_data() {
-                    PayloadData::OtapArrowRecords(result) => {
+                    PayloadData::OtapRecords(result) => {
                         // ensure the routed record was "sanitized"
                         let logs_batch = result.get(ArrowPayloadType::Logs).unwrap();
                         let severity_text_col = logs_batch
@@ -1825,7 +2147,7 @@ mod test {
                 assert_eq!(routed.len(), 1);
                 let (_context, payload) = routed.pop().unwrap().into_parts();
                 match payload.into_data() {
-                    PayloadData::OtapArrowRecords(result) => {
+                    PayloadData::OtapRecords(result) => {
                         assert_logs_records_equal(result, info_log_record);
                     }
                     _ => panic!("unexpected payload type"),
@@ -1873,15 +2195,10 @@ mod test {
                     .await
                     .expect("no process error");
 
-                let mut out = ctx.drain_pdata().await.into_iter().collect::<Vec<_>>();
-                assert_eq!(out.len(), 1);
-                let default_out: OtapArrowRecords = out
-                    .pop()
-                    .unwrap()
-                    .payload()
-                    .try_into_with_default()
-                    .unwrap();
-                assert_eq!(default_out, OtapArrowRecords::Logs(Logs::default()));
+                assert!(
+                    ctx.drain_pdata().await.is_empty(),
+                    "empty default output must not be forwarded"
+                );
 
                 // assert on what came out of the error out port
                 let mut routed = Vec::new();
@@ -2201,7 +2518,13 @@ mod test {
             .run_test(|mut ctx| async move {
                 let peer_addr: SocketAddr = "10.0.0.1:5005".parse().unwrap();
                 let mut headers = TransportHeaders::new();
-                headers.push(TransportHeader::text("tenant", "x-tenant", "acme"));
+                headers.push(TransportHeader::captured(
+                    context_name("tenant"),
+                    "x-tenant",
+                    true,
+                    ValueKind::Text,
+                    "acme".as_bytes(),
+                ));
 
                 let upstream_node_id = 999;
                 let pdata = create_pdata_with_subscriber(
@@ -2339,6 +2662,7 @@ mod test {
                     outbound_ctx_routed,
                     SignalType::Logs,
                     "downstream routed error",
+                    NackCause::Refused,
                 )
                 .await
                 .unwrap();
@@ -2351,6 +2675,7 @@ mod test {
                         let (node_id, nack) = next_nack(nack).expect("expected nack subscriber");
                         assert_eq!(node_id, upstream_node_id);
                         assert_eq!(nack.reason, "downstream routed error");
+                        assert_eq!(nack.cause, NackCause::Refused)
                     }
                     other => {
                         panic!("got unexpected pipeline ctrl message {other:?}")
@@ -2420,6 +2745,7 @@ mod test {
                     outbound_ctx_default,
                     SignalType::Logs,
                     "downstream default error",
+                    NackCause::RouteFull,
                 )
                 .await
                 .unwrap();
@@ -2439,6 +2765,7 @@ mod test {
                         let (node_id, nack) = next_nack(nack).expect("expected nack subscriber");
                         assert_eq!(node_id, upstream_node_id);
                         assert_eq!(nack.reason, "downstream default error");
+                        assert_eq!(nack.cause, NackCause::RouteFull)
                     }
                     other => {
                         panic!("got unexpected pipeline ctrl message {other:?}")
@@ -2529,6 +2856,7 @@ mod test {
                         let (node_id, nack) = next_nack(nack).expect("expected nack subscriber");
                         assert_eq!(node_id, upstream_node_id);
                         assert_eq!(nack.reason, "outbound slots were not available");
+                        assert_eq!(nack.cause, NackCause::RouteFull);
                     }
                     other => {
                         panic!("got unexpected pipeline ctrl message {other:?}")
@@ -2573,6 +2901,84 @@ mod test {
                     Some(1)
                 );
             })
+    }
+
+    /// Scenario: Two named outputs share one outbound slot while the default output is empty.
+    /// Guarantees: ACKing the one dispatched route NACKs upstream after the second route fails.
+    #[test]
+    fn test_routed_only_partial_send_nacks_after_dispatched_route_completes() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let query = r#"logs |
+        fork {
+            route_to "first_port"
+        }
+        {
+            route_to "second_port"
+        }
+        "#;
+        let mut processor = try_create_with_config(
+            json!({
+                "opl_query": query,
+                "outbound_request_limit": 1,
+            }),
+            &runtime,
+        )
+        .expect("created processor");
+        let first_port_rx = set_pdata_sender("first_port", &mut processor);
+        let second_port_rx = set_pdata_sender("second_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(1);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+                let pdata =
+                    create_pdata_with_subscriber(input, Interests::ACKS | Interests::NACKS, 1, 999);
+
+                let error = ctx
+                    .process(Message::PData(pdata))
+                    .await
+                    .expect_err("second route must exhaust outbound capacity");
+                assert!(error.to_string().contains("outbound slots not available"));
+                assert!(
+                    ctx.drain_pdata().await.is_empty(),
+                    "empty default output must not be forwarded"
+                );
+
+                let (first_context, _) = first_port_rx
+                    .recv()
+                    .await
+                    .expect("first routed output")
+                    .into_parts();
+                assert!(
+                    second_port_rx.is_empty(),
+                    "second route must not be dispatched without an outbound slot"
+                );
+                assert!(
+                    completion_rx.is_empty(),
+                    "upstream completion must wait for the dispatched route"
+                );
+
+                send_ack(&mut ctx, first_context, SignalType::Logs)
+                    .await
+                    .expect("ack dispatched route");
+
+                match completion_rx.recv().await.expect("upstream completion") {
+                    PipelineCompletionMsg::DeliverNack { nack } => {
+                        let (node_id, nack) =
+                            next_nack(nack).expect("expected upstream subscriber");
+                        assert_eq!(node_id, 999);
+                        assert_eq!(nack.reason, "outbound slots were not available");
+                        assert_eq!(nack.cause, NackCause::RouteFull);
+                    }
+                    other => panic!("expected DeliverNack, got {other:?}"),
+                }
+            })
+            .validate(|_ctx| async move {});
     }
 
     #[test]
@@ -2848,7 +3254,7 @@ mod test {
                 assert_eq!(routed.len(), 1);
                 let (_context, payload) = routed.pop().unwrap().into_parts();
                 match payload.into_data() {
-                    PayloadData::OtapArrowRecords(result) => {
+                    PayloadData::OtapRecords(result) => {
                         // check sanitization was skipped on routed record
                         let logs_batch = result.get(ArrowPayloadType::Logs).unwrap();
                         let severity_text_col = logs_batch
@@ -2963,5 +3369,605 @@ mod test {
                 );
             })
             .validate(|_ctx| async move {})
+    }
+
+    /// Scenario: A routed transform splits into a default output and a routed output, and both
+    /// downstream consumers respond with non-permanent (transient) nacks.
+    /// Guarantees: The upstream inbound batch receives a non-permanent nack, indicating the
+    /// failure is retryable since all downstream failures were transient.
+    #[test]
+    fn test_nack_permanence_all_transient_nacks() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let query = r#"logs
+            | if (severity_text == "ERROR") {
+                route_to "error_port"
+            }
+            "#;
+        let mut processor = try_create_with_opl_query(query, &runtime).expect("created processor");
+        let error_port_rx = set_pdata_sender("error_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(10);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let log_records = create_log_records(&["ERROR", "INFO"]);
+                let input = to_otap_logs(log_records);
+
+                let upstream_node_id = 999;
+                let pdata = create_pdata_with_subscriber(
+                    input,
+                    Interests::ACKS | Interests::NACKS,
+                    1,
+                    upstream_node_id,
+                );
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+
+                // collect outbound contexts from both outputs
+                let (outbound_ctx_default, _) = ctx.drain_pdata().await.pop().unwrap().into_parts();
+                let (outbound_ctx_routed, _) = error_port_rx.recv().await.unwrap().into_parts();
+
+                // both downstream consumers respond with transient (non-permanent) nacks
+                send_nack(
+                    &mut ctx,
+                    outbound_ctx_default,
+                    SignalType::Logs,
+                    "transient error on default",
+                    NackCause::Refused,
+                )
+                .await
+                .unwrap();
+                assert!(
+                    completion_rx.is_empty(),
+                    "upstream must not complete until all outbound batches are resolved"
+                );
+
+                send_nack(
+                    &mut ctx,
+                    outbound_ctx_routed,
+                    SignalType::Logs,
+                    "transient error on routed",
+                    NackCause::NodeShutdown,
+                )
+                .await
+                .unwrap();
+
+                // the upstream inbound batch should now receive a non-permanent nack
+                let completion = completion_rx.recv().await.unwrap();
+                match completion {
+                    PipelineCompletionMsg::DeliverNack { nack } => {
+                        let (node_id, nack) =
+                            next_nack(nack).expect("expected upstream nack subscriber");
+                        assert_eq!(node_id, upstream_node_id);
+                        assert!(
+                            !nack.permanent,
+                            "nack should be non-permanent when all downstream errors are transient"
+                        );
+                        // first error wins
+                        assert_eq!(nack.reason, "transient error on default");
+                        assert_eq!(nack.cause, NackCause::Refused);
+                    }
+                    other => {
+                        panic!("expected DeliverNack, got {other:?}")
+                    }
+                };
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: A routed transform splits into a default output and a routed output. The
+    /// default output is ACK'd (success) and the routed output is NACK'd with a transient error.
+    /// Guarantees: The upstream nack is permanent because at least one downstream consumer
+    /// successfully consumed the data (ACK), making the batch non-retryable as a whole.
+    #[test]
+    fn test_nack_permanence_mixed_ack_and_transient_nack() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let query = r#"logs
+            | if (severity_text == "ERROR") {
+                route_to "error_port"
+            }
+            "#;
+        let mut processor = try_create_with_opl_query(query, &runtime).expect("created processor");
+        let error_port_rx = set_pdata_sender("error_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(10);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let log_records = create_log_records(&["ERROR", "INFO"]);
+                let input = to_otap_logs(log_records);
+
+                let upstream_node_id = 999;
+                let pdata = create_pdata_with_subscriber(
+                    input,
+                    Interests::ACKS | Interests::NACKS,
+                    1,
+                    upstream_node_id,
+                );
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+
+                let (outbound_ctx_default, _) = ctx.drain_pdata().await.pop().unwrap().into_parts();
+                let (outbound_ctx_routed, _) = error_port_rx.recv().await.unwrap().into_parts();
+
+                // default output is ACK'd (downstream consumed the data)
+                send_ack(&mut ctx, outbound_ctx_default, SignalType::Logs)
+                    .await
+                    .unwrap();
+                assert!(completion_rx.is_empty());
+
+                // routed output is NACK'd with a transient error
+                send_nack(
+                    &mut ctx,
+                    outbound_ctx_routed,
+                    SignalType::Logs,
+                    "transient error on routed",
+                    NackCause::Refused,
+                )
+                .await
+                .unwrap();
+
+                let completion = completion_rx.recv().await.unwrap();
+                match completion {
+                    PipelineCompletionMsg::DeliverNack { nack } => {
+                        let (node_id, nack) =
+                            next_nack(nack).expect("expected upstream nack subscriber");
+                        assert_eq!(node_id, upstream_node_id);
+                        assert!(
+                            nack.permanent,
+                            "nack should be permanent when any downstream ACK'd (data was consumed)"
+                        );
+                        assert_eq!(nack.reason, "transient error on routed");
+                        assert_eq!(nack.cause, NackCause::Refused);
+                    }
+                    other => {
+                        panic!("expected DeliverNack, got {other:?}")
+                    }
+                };
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: A routed transform splits into a default output and a routed output. The
+    /// default output responds with a transient nack and the routed output responds with a
+    /// permanent nack.
+    /// Guarantees: The upstream nack is permanent because at least one downstream failure
+    /// was permanent (non-retryable).
+    #[test]
+    fn test_nack_permanence_one_permanent_nack() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let query = r#"logs
+            | if (severity_text == "ERROR") {
+                route_to "error_port"
+            }
+            "#;
+        let mut processor = try_create_with_opl_query(query, &runtime).expect("created processor");
+        let error_port_rx = set_pdata_sender("error_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(10);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let log_records = create_log_records(&["ERROR", "INFO"]);
+                let input = to_otap_logs(log_records);
+
+                let upstream_node_id = 999;
+                let pdata = create_pdata_with_subscriber(
+                    input,
+                    Interests::ACKS | Interests::NACKS,
+                    1,
+                    upstream_node_id,
+                );
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+
+                let (outbound_ctx_default, _) = ctx.drain_pdata().await.pop().unwrap().into_parts();
+                let (outbound_ctx_routed, _) = error_port_rx.recv().await.unwrap().into_parts();
+
+                // default output responds with a transient nack
+                send_nack(
+                    &mut ctx,
+                    outbound_ctx_default,
+                    SignalType::Logs,
+                    "transient error on default",
+                    NackCause::RouteClosed,
+                )
+                .await
+                .unwrap();
+                assert!(completion_rx.is_empty());
+
+                // routed output responds with a permanent nack
+                send_permanent_nack(
+                    &mut ctx,
+                    outbound_ctx_routed,
+                    SignalType::Logs,
+                    "permanent error on routed",
+                    NackCause::NodeShutdown,
+                )
+                .await
+                .unwrap();
+
+                let completion = completion_rx.recv().await.unwrap();
+                match completion {
+                    PipelineCompletionMsg::DeliverNack { nack } => {
+                        let (node_id, nack) =
+                            next_nack(nack).expect("expected upstream nack subscriber");
+                        assert_eq!(node_id, upstream_node_id);
+                        assert!(
+                            nack.permanent,
+                            "nack should be permanent when any downstream nack was permanent"
+                        );
+                        // first error wins
+                        assert_eq!(nack.reason, "transient error on default");
+                        assert_eq!(nack.cause, NackCause::RouteClosed);
+                    }
+                    other => {
+                        panic!("expected DeliverNack, got {other:?}")
+                    }
+                };
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: A transform with a single output (no routing) receives a transient nack
+    /// from downstream.
+    /// Guarantees: The upstream nack is non-permanent since the only downstream failure
+    /// was transient.
+    #[test]
+    fn test_nack_permanence_single_transient_nack() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let mut processor = try_create_with_opl_query("logs | route_to \"test_port\"", &runtime)
+            .expect("created processor");
+        let test_port_rx = set_pdata_sender("test_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(10);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+                let upstream_node_id = 999;
+                let pdata = create_pdata_with_subscriber(
+                    input,
+                    Interests::ACKS | Interests::NACKS,
+                    1,
+                    upstream_node_id,
+                );
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(ctx.drain_pdata().await.is_empty());
+
+                let (routed_context, _) = test_port_rx
+                    .recv()
+                    .await
+                    .expect("routed output")
+                    .into_parts();
+
+                send_nack(
+                    &mut ctx,
+                    routed_context,
+                    SignalType::Logs,
+                    "transient downstream error",
+                    NackCause::Refused,
+                )
+                .await
+                .unwrap();
+
+                let completion = completion_rx.recv().await.unwrap();
+                match completion {
+                    PipelineCompletionMsg::DeliverNack { nack } => {
+                        let (node_id, nack) =
+                            next_nack(nack).expect("expected upstream nack subscriber");
+                        assert_eq!(node_id, upstream_node_id);
+                        assert!(
+                            !nack.permanent,
+                            "nack should be non-permanent for a single transient downstream error"
+                        );
+                        assert_eq!(nack.reason, "transient downstream error");
+                        assert_eq!(nack.cause, NackCause::Refused);
+                    }
+                    other => {
+                        panic!("expected DeliverNack, got {other:?}")
+                    }
+                };
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: A transform with a single output (no routing) receives a permanent nack
+    /// from downstream.
+    /// Guarantees: The upstream nack is permanent since the downstream failure was permanent.
+    #[test]
+    fn test_nack_permanence_single_permanent_nack() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let mut processor = try_create_with_opl_query("logs | route_to \"test_port\"", &runtime)
+            .expect("created processor");
+        let test_port_rx = set_pdata_sender("test_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(10);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+                let upstream_node_id = 999;
+                let pdata = create_pdata_with_subscriber(
+                    input,
+                    Interests::ACKS | Interests::NACKS,
+                    1,
+                    upstream_node_id,
+                );
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(ctx.drain_pdata().await.is_empty());
+
+                let (routed_context, _) = test_port_rx
+                    .recv()
+                    .await
+                    .expect("routed output")
+                    .into_parts();
+
+                send_permanent_nack(
+                    &mut ctx,
+                    routed_context,
+                    SignalType::Logs,
+                    "permanent downstream error",
+                    NackCause::Refused,
+                )
+                .await
+                .unwrap();
+
+                let completion = completion_rx.recv().await.unwrap();
+                match completion {
+                    PipelineCompletionMsg::DeliverNack { nack } => {
+                        let (node_id, nack) =
+                            next_nack(nack).expect("expected upstream nack subscriber");
+                        assert_eq!(node_id, upstream_node_id);
+                        assert!(
+                            nack.permanent,
+                            "nack should be permanent for a single permanent downstream error"
+                        );
+                        assert_eq!(nack.reason, "permanent downstream error");
+                        assert_eq!(nack.cause, NackCause::Refused);
+                    }
+                    other => {
+                        panic!("expected DeliverNack, got {other:?}")
+                    }
+                };
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: An inbound batch subscribes with RETURN_DATA interest and is NACK'd downstream.
+    /// Guarantees: The upstream nack includes the original inbound payload, allowing upstream
+    /// components (e.g. retry processors) to re-process the data.
+    #[test]
+    fn test_nack_includes_payload_when_return_data_requested() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let mut processor = try_create_with_opl_query("logs | route_to \"test_port\"", &runtime)
+            .expect("created processor");
+        let test_port_rx = set_pdata_sender("test_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(10);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+                let expected_num_items = OtapPayload::from(input.clone()).num_items();
+
+                let upstream_node_id = 999;
+                // subscribe with RETURN_DATA so payload is preserved during unwind
+                let pdata = create_pdata_with_subscriber(
+                    input,
+                    Interests::NACKS | Interests::RETURN_DATA,
+                    1,
+                    upstream_node_id,
+                );
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(ctx.drain_pdata().await.is_empty());
+
+                let (routed_context, _) = test_port_rx
+                    .recv()
+                    .await
+                    .expect("routed output")
+                    .into_parts();
+
+                send_nack(
+                    &mut ctx,
+                    routed_context,
+                    SignalType::Logs,
+                    "downstream error",
+                    NackCause::Refused,
+                )
+                .await
+                .unwrap();
+
+                let completion = completion_rx.recv().await.unwrap();
+                match completion {
+                    PipelineCompletionMsg::DeliverNack { nack } => {
+                        let (node_id, mut nack) =
+                            next_nack(nack).expect("expected upstream nack subscriber");
+                        assert_eq!(node_id, upstream_node_id);
+                        assert_eq!(
+                            nack.refused.num_items(),
+                            expected_num_items,
+                            "nack should include the original payload when RETURN_DATA is set"
+                        );
+                        assert_eq!(nack.cause, NackCause::Refused);
+                    }
+                    other => {
+                        panic!("expected DeliverNack, got {other:?}")
+                    }
+                };
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: An inbound batch subscribes with NACKS interest but without RETURN_DATA, and
+    /// is NACK'd downstream.
+    /// Guarantees: The upstream nack has an empty payload since the subscriber did not request
+    /// data return.
+    #[test]
+    fn test_nack_excludes_payload_when_return_data_not_requested() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let mut processor = try_create_with_opl_query("logs | route_to \"test_port\"", &runtime)
+            .expect("created processor");
+        let test_port_rx = set_pdata_sender("test_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(10);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+
+                let upstream_node_id = 999;
+                // subscribe with NACKS only -- no RETURN_DATA
+                let pdata =
+                    create_pdata_with_subscriber(input, Interests::NACKS, 1, upstream_node_id);
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(ctx.drain_pdata().await.is_empty());
+
+                let (routed_context, _) = test_port_rx
+                    .recv()
+                    .await
+                    .expect("routed output")
+                    .into_parts();
+
+                send_nack(
+                    &mut ctx,
+                    routed_context,
+                    SignalType::Logs,
+                    "downstream error",
+                    NackCause::RouteClosed,
+                )
+                .await
+                .unwrap();
+
+                let completion = completion_rx.recv().await.unwrap();
+                match completion {
+                    PipelineCompletionMsg::DeliverNack { nack } => {
+                        let (node_id, mut nack) =
+                            next_nack(nack).expect("expected upstream nack subscriber");
+                        assert_eq!(node_id, upstream_node_id);
+                        assert_eq!(
+                            nack.refused.num_items(),
+                            0,
+                            "nack should have empty payload when RETURN_DATA is not set"
+                        );
+                        assert_eq!(nack.cause, NackCause::RouteClosed);
+                    }
+                    other => {
+                        panic!("expected DeliverNack, got {other:?}")
+                    }
+                };
+            })
+            .validate(|_ctx| async move {});
+    }
+
+    /// Scenario: An inbound batch subscribes with RETURN_DATA interest and all downstream
+    /// outputs are ACK'd.
+    /// Guarantees: The upstream ack includes the original inbound payload.
+    #[test]
+    fn test_ack_includes_payload_when_return_data_requested() {
+        let runtime = TestRuntime::<OtapPdata>::new();
+        let mut processor = try_create_with_opl_query("logs | route_to \"test_port\"", &runtime)
+            .expect("created processor");
+        let test_port_rx = set_pdata_sender("test_port", &mut processor);
+
+        runtime
+            .set_processor(processor)
+            .run_test(|mut ctx| async move {
+                let (runtime_ctrl_tx, _runtime_ctrl_rx) = runtime_ctrl_msg_channel(10);
+                let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(10);
+                ctx.set_runtime_ctrl_sender(runtime_ctrl_tx);
+                ctx.set_pipeline_completion_sender(completion_tx);
+
+                let input = to_otap_logs(vec![LogRecord::build().severity_text("ERROR").finish()]);
+                let expected_num_items = OtapPayload::from(input.clone()).num_items();
+
+                let upstream_node_id = 999;
+                // subscribe with RETURN_DATA so payload is preserved during unwind
+                let pdata = create_pdata_with_subscriber(
+                    input,
+                    Interests::ACKS | Interests::RETURN_DATA,
+                    1,
+                    upstream_node_id,
+                );
+
+                ctx.process(Message::PData(pdata))
+                    .await
+                    .expect("no process error");
+                assert!(ctx.drain_pdata().await.is_empty());
+
+                let (routed_context, _) = test_port_rx
+                    .recv()
+                    .await
+                    .expect("routed output")
+                    .into_parts();
+
+                send_ack(&mut ctx, routed_context, SignalType::Logs)
+                    .await
+                    .unwrap();
+
+                let completion = completion_rx.recv().await.unwrap();
+                match completion {
+                    PipelineCompletionMsg::DeliverAck { ack } => {
+                        let (node_id, mut ack) =
+                            next_ack(ack).expect("expected upstream ack subscriber");
+                        assert_eq!(node_id, upstream_node_id);
+                        assert_eq!(
+                            ack.accepted.num_items(),
+                            expected_num_items,
+                            "ack should include the original payload when RETURN_DATA is set"
+                        );
+                    }
+                    other => {
+                        panic!("expected DeliverAck, got {other:?}")
+                    }
+                };
+            })
+            .validate(|_ctx| async move {});
     }
 }

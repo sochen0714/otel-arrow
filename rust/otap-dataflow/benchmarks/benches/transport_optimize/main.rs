@@ -13,8 +13,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, UInt16Type};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use otel_arrow_dfe_core_nodes::receivers::traffic_generator::config::{Config, TrafficConfig};
-use otel_arrow_dfe_core_nodes::receivers::traffic_generator::semconv_signal::semconv_otlp_logs;
+use otel_arrow_dfe_dev_nodes::receivers::traffic_generator::config::{Config, TrafficConfig};
+use otel_arrow_dfe_dev_nodes::receivers::traffic_generator::semconv_signal::semconv_otlp_logs;
 use otel_arrow_dfe_pdata::OtapArrowRecords;
 use otel_arrow_dfe_pdata::otap::transform::materialize_parent_id_for_attributes;
 use otel_arrow_dfe_pdata::otlp::attributes::AttributeValueType;
@@ -24,7 +24,6 @@ use otel_arrow_dfe_pdata::proto::opentelemetry::logs::v1::LogsData;
 use otel_arrow_dfe_pdata::schema::consts;
 use otel_arrow_dfe_pdata::testing::round_trip::otlp_to_otap;
 use prost::Message;
-use weaver_common::vdir::VirtualDirectoryPath;
 
 #[cfg(not(windows))]
 use tikv_jemallocator::Jemalloc;
@@ -46,11 +45,8 @@ fn gen_fake_logs_batch(batch_size: usize) {
         return;
     }
 
-    let registry_path = VirtualDirectoryPath::GitRepo {
-        url: "https://github.com/open-telemetry/semantic-conventions.git".to_owned(),
-        sub_folder: Some("model".to_owned()),
-        refspec: None,
-    };
+    let registry_path =
+        otel_arrow_dfe_dev_nodes::receivers::traffic_generator::config::default_registry_path();
 
     let traffic_config = TrafficConfig::new(None, None, 10000, 1, 1, 1);
     let config = Config::new(traffic_config, registry_path);

@@ -1,0 +1,716 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
+use std::rc::Rc;
+
+use arrow::buffer::Buffer;
+use arrow::datatypes::*;
+use otel_arrow_contrib_data_engine_expressions::*;
+
+use crate::*;
+
+#[derive(Debug, Clone)]
+pub enum ArrayValueOrRef<'a> {
+    Ref(&'a (dyn ArrayValue + 'a)),
+    Buffer(BufferArray),
+    Owned(Rc<OwnedArrayValue<'a>>),
+    Slice(ArrayValueOrRefSlice<'a>),
+}
+
+impl<'a> ArrayValueOrRef<'a> {
+    pub fn as_array_value(&self) -> &(dyn ArrayValue + 'a) {
+        match self {
+            ArrayValueOrRef::Ref(a) => *a,
+            ArrayValueOrRef::Buffer(a) => a.as_array_value(),
+            ArrayValueOrRef::Owned(a) => a.as_ref(),
+            ArrayValueOrRef::Slice(a) => a,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            ArrayValueOrRef::Ref(a) => a.len(),
+            ArrayValueOrRef::Buffer(a) => a.as_array_value().len(),
+            ArrayValueOrRef::Owned(a) => a.len(),
+            ArrayValueOrRef::Slice(a) => a.len(),
+        }
+    }
+
+    pub fn get(&self, index: usize) -> ValueOrRef<'a> {
+        match self {
+            ArrayValueOrRef::Ref(a) => a
+                .get(index)
+                .map(|v| v.to_value().into())
+                .unwrap_or(ValueOrRef::Null),
+            ArrayValueOrRef::Buffer(a) => a.get(index),
+            ArrayValueOrRef::Owned(a) => a
+                .get_values()
+                .get(index)
+                .cloned()
+                .unwrap_or(ValueOrRef::Null),
+            ArrayValueOrRef::Slice(a) => a.get(index),
+        }
+    }
+}
+
+impl Hash for ArrayValueOrRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        [7].hash(state);
+        match self {
+            ArrayValueOrRef::Ref(a) => {
+                hash_array_value(state, *a);
+            }
+            ArrayValueOrRef::Buffer(a) => {
+                hash_array_value(state, a.as_array_value());
+            }
+            ArrayValueOrRef::Owned(a) => {
+                a.len().hash(state);
+                for v in &a.values {
+                    v.hash(state);
+                }
+            }
+            ArrayValueOrRef::Slice(a) => {
+                hash_array_value(state, a);
+            }
+        }
+    }
+}
+
+impl PartialEq for ArrayValueOrRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        let left = self.as_array_value();
+        let right = other.as_array_value();
+
+        if left.len() == right.len() {
+            for index in 0..left.len() {
+                match (left.get(index), right.get(index)) {
+                    (None, None) => {}
+                    (Some(l), Some(r)) => {
+                        if Into::<ValueOrRef>::into(l.to_value())
+                            != Into::<ValueOrRef>::into(r.to_value())
+                        {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+}
+
+impl Eq for ArrayValueOrRef<'_> {}
+
+fn hash_array_value<H: Hasher>(state: &mut H, a: &dyn ArrayValue) {
+    a.len().hash(state);
+    a.get_items(&mut |_, v| {
+        Into::<ValueOrRef>::into(v).hash(state);
+        true
+    });
+}
+
+impl<'a, const N: usize> From<[ValueOrRef<'a>; N]> for ArrayValueOrRef<'a> {
+    fn from(arr: [ValueOrRef<'a>; N]) -> Self {
+        ArrayValueOrRef::Owned(
+            OwnedArrayValue {
+                values: Vec::from_iter(arr),
+            }
+            .into(),
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum BufferArray {
+    U8(BufferWrapper<u8>),
+}
+
+impl BufferArray {
+    pub fn new_u8(value: Buffer) -> BufferArray {
+        BufferArray::U8(BufferWrapper::new(value))
+    }
+
+    pub fn as_array_value<'a>(&self) -> &(dyn ArrayValue + 'a) {
+        match self {
+            BufferArray::U8(b) => b,
+        }
+    }
+
+    pub fn get<'a>(&self, index: usize) -> ValueOrRef<'a> {
+        match self {
+            BufferArray::U8(a) => a.get(index),
+        }
+    }
+}
+
+impl From<BufferArray> for OwnedArrayValue<'_> {
+    fn from(value: BufferArray) -> Self {
+        match value {
+            BufferArray::U8(b) => b.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BufferWrapper<T> {
+    value: Buffer,
+    marker: PhantomData<T>,
+}
+
+impl<T: ArrowNativeType + AsStaticValue + Into<i64>> BufferWrapper<T> {
+    pub fn new(value: Buffer) -> BufferWrapper<T> {
+        Self {
+            value,
+            marker: Default::default(),
+        }
+    }
+
+    pub fn get_buffer(&self) -> &Buffer {
+        &self.value
+    }
+
+    pub fn get<'a>(&self, index: usize) -> ValueOrRef<'a> {
+        self.value
+            .typed_data::<T>()
+            .get(index)
+            .map(|v| ValueOrRef::Integer(Into::<i64>::into(*v)))
+            .unwrap_or(ValueOrRef::Null)
+    }
+}
+
+impl<T: ArrowNativeType> AsRef<[T]> for BufferWrapper<T> {
+    fn as_ref(&self) -> &[T] {
+        self.value.typed_data()
+    }
+}
+
+impl<T: ArrowNativeType + AsStaticValue + Into<i64>> ArrayValue for BufferWrapper<T> {
+    fn is_empty(&self) -> bool {
+        self.value.typed_data::<T>().is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.value.typed_data::<T>().len()
+    }
+
+    fn get(&self, index: usize) -> Option<&dyn AsValue> {
+        self.value
+            .typed_data::<T>()
+            .get(index)
+            .map(|v| v as &dyn AsValue)
+    }
+
+    fn get_static(&self, index: usize) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
+        Ok(self
+            .value
+            .typed_data::<T>()
+            .get(index)
+            .map(|v| v as &dyn AsStaticValue))
+    }
+
+    fn get_item_range<'a>(
+        &'a self,
+        range: ArrayRange,
+        item_callback: &mut ArrayValueIteratorCallback<'a, '_>,
+    ) -> bool {
+        let values = range.get_slice(self.value.typed_data::<T>());
+        for (index, value) in values.iter().enumerate() {
+            if !(item_callback)(index, value.to_value()) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<T> Hash for BufferWrapper<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
+impl<T> PartialEq for BufferWrapper<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<T> Eq for BufferWrapper<T> {}
+
+impl<T: ArrowNativeType + Into<i64>> From<BufferWrapper<T>> for OwnedArrayValue<'_> {
+    fn from(value: BufferWrapper<T>) -> Self {
+        let values: Vec<ValueOrRef> = value
+            .value
+            .typed_data::<T>()
+            .iter()
+            .map(|v| ValueOrRef::Integer(Into::<i64>::into(*v)))
+            .collect();
+
+        OwnedArrayValue::from(values)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OwnedArrayValue<'a> {
+    values: Vec<ValueOrRef<'a>>,
+}
+
+impl<'a> OwnedArrayValue<'a> {
+    pub fn new() -> OwnedArrayValue<'a> {
+        Self { values: vec![] }
+    }
+
+    pub fn with_capacity(capacity: usize) -> OwnedArrayValue<'a> {
+        Self {
+            values: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn get_values(&self) -> &[ValueOrRef<'a>] {
+        &self.values
+    }
+
+    pub fn get_values_mut(&mut self) -> &mut Vec<ValueOrRef<'a>> {
+        &mut self.values
+    }
+}
+
+impl<'a> ArrayValue for OwnedArrayValue<'a> {
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&(dyn AsValue + 'a)> {
+        self.values.get(index).map(|v| v as &dyn AsValue)
+    }
+
+    fn get_static(&self, _index: usize) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
+        unreachable!("should never be called by columnar engine")
+    }
+
+    fn get_item_range<'b>(
+        &'b self,
+        range: ArrayRange,
+        item_callback: &mut ArrayValueIteratorCallback<'b, '_>,
+    ) -> bool {
+        for (index, value) in range.get_slice(&self.values).iter().enumerate() {
+            if !(item_callback)(index, value.to_value()) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl<'a> Default for OwnedArrayValue<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> From<Vec<ValueOrRef<'a>>> for OwnedArrayValue<'a> {
+    fn from(value: Vec<ValueOrRef<'a>>) -> Self {
+        Self { values: value }
+    }
+}
+
+impl<'a> From<&'a (dyn ArrayValue + 'a)> for OwnedArrayValue<'a> {
+    fn from(value: &'a (dyn ArrayValue + 'a)) -> Self {
+        let mut array = OwnedArrayValue::with_capacity(value.len());
+
+        let values = array.get_values_mut();
+
+        value.get_items(&mut |_, value| {
+            values.push(value.into());
+            true
+        });
+
+        array
+    }
+}
+
+impl<'a> From<ArrayValueOrRef<'a>> for OwnedArrayValue<'a> {
+    fn from(value: ArrayValueOrRef<'a>) -> Self {
+        match value {
+            ArrayValueOrRef::Owned(a) => Rc::unwrap_or_clone(a),
+            ArrayValueOrRef::Ref(a) => a.into(),
+            ArrayValueOrRef::Buffer(a) => a.into(),
+            ArrayValueOrRef::Slice(a) => {
+                let mut array = OwnedArrayValue::with_capacity(a.len());
+
+                let values = array.get_values_mut();
+
+                for index in 0..a.len() {
+                    values.push(a.get(index));
+                }
+
+                array
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ArrayValueOrRefSlice<'a> {
+    value: Box<ArrayValueOrRef<'a>>,
+    range_start_inclusive: usize,
+    range_end_exclusive: usize,
+}
+
+impl<'a> ArrayValueOrRefSlice<'a> {
+    pub fn new(
+        value: ArrayValueOrRef<'a>,
+        range_start_inclusive: usize,
+        range_end_exclusive: usize,
+    ) -> ArrayValueOrRefSlice<'a> {
+        assert!(
+            range_start_inclusive <= range_end_exclusive,
+            "range start index {range_start_inclusive} exceeds range end index {range_end_exclusive}"
+        );
+        assert!(
+            range_end_exclusive <= value.len(),
+            "range end index {range_end_exclusive} out of range for array of length {}",
+            value.len()
+        );
+
+        Self {
+            value: value.into(),
+            range_start_inclusive,
+            range_end_exclusive,
+        }
+    }
+
+    pub fn get(&self, index: usize) -> ValueOrRef<'a> {
+        if index >= self.len() {
+            return ValueOrRef::Null;
+        }
+
+        match self.value.as_ref() {
+            ArrayValueOrRef::Ref(a) => a
+                .get(self.range_start_inclusive + index)
+                .map(|v| v.to_value().into())
+                .unwrap_or(ValueOrRef::Null),
+            ArrayValueOrRef::Buffer(a) => a.get(self.range_start_inclusive + index),
+            ArrayValueOrRef::Owned(a) => a
+                .get_values()
+                .get(self.range_start_inclusive + index)
+                .cloned()
+                .unwrap_or(ValueOrRef::Null),
+            ArrayValueOrRef::Slice(a) => a.get(self.range_start_inclusive + index),
+        }
+    }
+}
+
+impl ArrayValue for ArrayValueOrRefSlice<'_> {
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn len(&self) -> usize {
+        self.range_end_exclusive - self.range_start_inclusive
+    }
+
+    fn get(&self, index: usize) -> Option<&dyn AsValue> {
+        if index >= self.len() {
+            return None;
+        }
+
+        self.value
+            .as_array_value()
+            .get(self.range_start_inclusive + index)
+    }
+
+    fn get_static(&self, index: usize) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
+        if index >= self.len() {
+            return Ok(None);
+        }
+
+        self.value
+            .as_array_value()
+            .get_static(self.range_start_inclusive + index)
+    }
+
+    fn get_item_range<'a>(
+        &'a self,
+        range: ArrayRange,
+        item_callback: &mut ArrayValueIteratorCallback<'a, '_>,
+    ) -> bool {
+        let len = self.len();
+        let relative_start = range.get_start_range_inclusize().unwrap_or(0);
+        let relative_end = range.get_end_range_exclusive().unwrap_or(len);
+
+        assert!(
+            relative_start <= relative_end,
+            "range start index {relative_start} exceeds range end index {relative_end}"
+        );
+        assert!(
+            relative_end <= len,
+            "range end index {relative_end} out of range for slice of length {len}"
+        );
+
+        self.value.as_array_value().get_item_range(
+            (self.range_start_inclusive + relative_start
+                ..self.range_start_inclusive + relative_end)
+                .into(),
+            item_callback,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::hash_map::DefaultHasher;
+
+    use super::*;
+
+    fn hash(value: &ArrayValueOrRef<'_>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Scenario: A byte buffer is viewed through the columnar array abstraction and converted to owned values.
+    /// Guarantees: Length, indexed access, iteration, and ownership conversion preserve every byte.
+    #[test]
+    fn buffer_array_preserves_byte_values() {
+        let buffer = BufferArray::new_u8(Buffer::from(vec![1_u8, 2, 255]));
+        let array = ArrayValueOrRef::Buffer(buffer.clone());
+
+        assert_eq!(array.len(), 3);
+        assert_eq!(array.get(1), ValueOrRef::Integer(2));
+        assert_eq!(array.get(3), ValueOrRef::Null);
+
+        let mut visited = Vec::new();
+        assert!(buffer.as_array_value().get_items(&mut |index, value| {
+            visited.push((index, ValueOrRef::from(value)));
+            true
+        }));
+        assert_eq!(
+            visited,
+            vec![
+                (0, ValueOrRef::Integer(1)),
+                (1, ValueOrRef::Integer(2)),
+                (2, ValueOrRef::Integer(255))
+            ]
+        );
+
+        let owned = OwnedArrayValue::from(buffer);
+        assert_eq!(
+            owned.get_values(),
+            &[
+                ValueOrRef::Integer(1),
+                ValueOrRef::Integer(2),
+                ValueOrRef::Integer(255)
+            ]
+        );
+    }
+
+    /// Scenario: An array slice is taken from a larger owned array and then sliced again.
+    /// Guarantees: Nested slices expose only their declared ranges and reject indexes at the slice boundary.
+    #[test]
+    fn nested_array_slices_enforce_their_bounds() {
+        let source = ArrayValueOrRef::from([
+            ValueOrRef::Integer(10),
+            ValueOrRef::Integer(20),
+            ValueOrRef::Integer(30),
+            ValueOrRef::Integer(40),
+        ]);
+        let first = ArrayValueOrRefSlice::new(source, 1, 4);
+        let nested = ArrayValueOrRefSlice::new(ArrayValueOrRef::Slice(first), 1, 2);
+
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested.get(0), ValueOrRef::Integer(30));
+        assert_eq!(nested.get(1), ValueOrRef::Null);
+        assert!(ArrayValue::get(&nested, 1).is_none());
+        assert!(nested.get_static(1).unwrap().is_none());
+    }
+
+    /// Scenario: Empty slices are constructed at both valid boundaries of an owned array.
+    /// Guarantees: Empty ranges are accepted and expose no values without accessing adjacent storage.
+    #[test]
+    fn array_slice_constructor_accepts_valid_empty_ranges() {
+        let start =
+            ArrayValueOrRefSlice::new(ArrayValueOrRef::from([ValueOrRef::Integer(10)]), 0, 0);
+        let end = ArrayValueOrRefSlice::new(ArrayValueOrRef::from([ValueOrRef::Integer(10)]), 1, 1);
+
+        assert!(start.is_empty());
+        assert!(end.is_empty());
+        assert_eq!(start.get(0), ValueOrRef::Null);
+        assert_eq!(end.get(0), ValueOrRef::Null);
+    }
+
+    /// Scenario: An array slice is constructed with its start after its end.
+    /// Guarantees: Reversed ranges are rejected immediately instead of underflowing during length calculation.
+    #[test]
+    #[should_panic(expected = "range start index 2 exceeds range end index 1")]
+    fn array_slice_constructor_rejects_reversed_ranges() {
+        let _ = ArrayValueOrRefSlice::new(
+            ArrayValueOrRef::from([ValueOrRef::Integer(10), ValueOrRef::Integer(20)]),
+            2,
+            1,
+        );
+    }
+
+    /// Scenario: An array slice ends beyond the length of its backing array.
+    /// Guarantees: Out-of-bounds ranges are rejected at construction rather than producing deferred nulls or panics.
+    #[test]
+    #[should_panic(expected = "range end index 3 out of range for array of length 2")]
+    fn array_slice_constructor_rejects_ranges_beyond_backing_array() {
+        let _ = ArrayValueOrRefSlice::new(
+            ArrayValueOrRef::from([ValueOrRef::Integer(10), ValueOrRef::Integer(20)]),
+            0,
+            3,
+        );
+    }
+
+    /// Scenario: Iteration and ownership conversion operate on a nested slice surrounded by values in its backing array.
+    /// Guarantees: Both operations expose only the nested range, use slice-relative indexes, and propagate callback termination.
+    #[test]
+    fn nested_array_slice_iteration_and_ownership_preserve_bounds() {
+        let source = ArrayValueOrRef::from([
+            ValueOrRef::Integer(10),
+            ValueOrRef::Integer(20),
+            ValueOrRef::Integer(30),
+            ValueOrRef::Integer(40),
+            ValueOrRef::Integer(50),
+        ]);
+        let first = ArrayValueOrRefSlice::new(source, 1, 5);
+        let nested = ArrayValueOrRefSlice::new(ArrayValueOrRef::Slice(first), 1, 3);
+
+        let mut visited = Vec::new();
+        assert!(nested.get_items(&mut |index, value| {
+            visited.push((index, ValueOrRef::from(value)));
+            true
+        }));
+        assert_eq!(
+            visited,
+            vec![(0, ValueOrRef::Integer(30)), (1, ValueOrRef::Integer(40))]
+        );
+
+        let mut visits = 0;
+        assert!(!nested.get_items(&mut |_, _| {
+            visits += 1;
+            false
+        }));
+        assert_eq!(visits, 1);
+
+        let owned = OwnedArrayValue::from(ArrayValueOrRef::Slice(nested));
+        assert_eq!(
+            owned.get_values(),
+            &[ValueOrRef::Integer(30), ValueOrRef::Integer(40)]
+        );
+    }
+
+    /// Scenario: Explicit interior, empty, and full-boundary ranges are iterated from a non-zero-offset slice.
+    /// Guarantees: Range translation remains slice-relative and emits only the requested values with zero-based indexes.
+    #[test]
+    fn array_slice_explicit_range_iteration_is_slice_relative() {
+        let slice = ArrayValueOrRefSlice::new(
+            ArrayValueOrRef::from([
+                ValueOrRef::Integer(10),
+                ValueOrRef::Integer(20),
+                ValueOrRef::Integer(30),
+                ValueOrRef::Integer(40),
+            ]),
+            1,
+            4,
+        );
+
+        let mut interior = Vec::new();
+        assert!(slice.get_item_range((1..2).into(), &mut |index, value| {
+            interior.push((index, ValueOrRef::from(value)));
+            true
+        }));
+        assert_eq!(interior, vec![(0, ValueOrRef::Integer(30))]);
+
+        let mut empty_visits = 0;
+        assert!(slice.get_item_range((2..2).into(), &mut |_, _| {
+            empty_visits += 1;
+            true
+        }));
+        assert_eq!(empty_visits, 0);
+
+        let mut full = Vec::new();
+        assert!(slice.get_item_range((0..3).into(), &mut |index, value| {
+            full.push((index, ValueOrRef::from(value)));
+            true
+        }));
+        assert_eq!(
+            full,
+            vec![
+                (0, ValueOrRef::Integer(20)),
+                (1, ValueOrRef::Integer(30)),
+                (2, ValueOrRef::Integer(40))
+            ]
+        );
+    }
+
+    /// Scenario: Explicit iteration requests a range ending beyond the slice boundary.
+    /// Guarantees: The slice rejects the range instead of exposing adjacent backing-array values.
+    #[test]
+    #[should_panic(expected = "range end index 3 out of range for slice of length 2")]
+    fn array_slice_range_iteration_rejects_end_beyond_slice() {
+        let slice = ArrayValueOrRefSlice::new(
+            ArrayValueOrRef::from([
+                ValueOrRef::Integer(10),
+                ValueOrRef::Integer(20),
+                ValueOrRef::Integer(30),
+                ValueOrRef::Integer(40),
+            ]),
+            1,
+            3,
+        );
+
+        slice.get_item_range((0..3).into(), &mut |_, _| true);
+    }
+
+    /// Scenario: Explicit iteration requests a range whose start follows its end.
+    /// Guarantees: Reversed subranges are rejected before translating indexes into the backing array.
+    #[test]
+    #[should_panic(expected = "range start index 2 exceeds range end index 1")]
+    fn array_slice_range_iteration_rejects_reversed_range() {
+        let slice = ArrayValueOrRefSlice::new(
+            ArrayValueOrRef::from([
+                ValueOrRef::Integer(10),
+                ValueOrRef::Integer(20),
+                ValueOrRef::Integer(30),
+            ]),
+            0,
+            3,
+        );
+
+        let start = 2;
+        let end = 1;
+        slice.get_item_range((start..end).into(), &mut |_, _| true);
+    }
+
+    /// Scenario: The same integer sequence uses Arrow-buffered and owned array representations.
+    /// Guarantees: Representation-independent equality also preserves the equal-values/equal-hash contract.
+    #[test]
+    fn array_equality_and_hash_are_representation_independent() {
+        let buffered = ArrayValueOrRef::Buffer(BufferArray::new_u8(Buffer::from(vec![4_u8, 5, 6])));
+        let owned = ArrayValueOrRef::from([
+            ValueOrRef::Integer(4),
+            ValueOrRef::Integer(5),
+            ValueOrRef::Integer(6),
+        ]);
+
+        assert_eq!(buffered, owned);
+        assert_eq!(hash(&buffered), hash(&owned));
+    }
+}

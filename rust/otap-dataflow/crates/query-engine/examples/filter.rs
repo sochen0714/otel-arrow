@@ -7,7 +7,7 @@
 
 use arrow::util::pretty::print_batches;
 
-use data_engine_kql_parser::{KqlParser, Parser};
+use otel_arrow_contrib_data_engine_kql_parser::{KqlParser, Parser};
 use otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::{
     AnyValue, InstrumentationScope, KeyValue,
@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     // simple example filtering logs by some property:
     let query = "logs | where severity_text == \"ERROR\"";
     let pipeline_expr = KqlParser::parse(query).expect("parses").pipeline;
-    let mut pipeline = Pipeline::new(pipeline_expr);
+    let mut pipeline = Pipeline::try_new(pipeline_expr)?;
 
     let otap_batch = otlp_to_otap(&otel_arrow_dfe_pdata::proto::OtlpProtoMessage::Logs(
         logs.clone(),
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
     // simple example filtering logs by attributes
     let query = "logs | where attributes[\"service.name\"] == \"my-app-2\"";
     let pipeline_expr = KqlParser::parse(query).expect("parses").pipeline;
-    let mut pipeline = Pipeline::new(pipeline_expr);
+    let mut pipeline = Pipeline::try_new(pipeline_expr)?;
 
     let otap_batch = otlp_to_otap(&otel_arrow_dfe_pdata::proto::OtlpProtoMessage::Logs(
         logs.clone(),

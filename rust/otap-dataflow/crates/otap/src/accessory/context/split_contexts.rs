@@ -5,18 +5,40 @@
 //! produced by processors that may split the incoming batch into
 //! multiple outbound batches
 
+use otel_arrow_dfe_engine::control::NackCause;
+#[cfg(test)]
+use otel_arrow_dfe_pdata_codec::OtapPayload;
 use slotmap::Key as _;
 use std::num::NonZeroUsize;
 
 use crate::{
     accessory::slots::{Key, State},
-    pdata::Context,
+    pdata::PdataDelivery,
 };
 
-struct Inbound {
-    context: Context,
-    error_reason: Option<String>,
+/// Context for inbound batch
+pub struct Inbound {
+    /// Original delivery ownership and input retained for completion.
+    pub delivery: PdataDelivery,
+
+    /// error that may have been produced via processing for some outbound batch
+    pub error: Option<OutboundError>,
+
     num_outbound: usize,
+
+    /// Whether all the downstream batches resulted in errors which were transient.
+    /// If so, we could emit a Nack for the inbound batch that is transient, otherwise
+    /// if there are any errors we must emit a permanent Nack.
+    pub outbound_all_transient_errors: bool,
+}
+
+/// represents error that may have been produced via processing for some outbound batch
+pub struct OutboundError {
+    /// reason for the error
+    pub reason: String,
+
+    /// identifier of cause of the error
+    pub cause: NackCause,
 }
 
 struct Outbound {
@@ -56,22 +78,26 @@ impl Contexts {
     ///
     /// # Parameters
     ///
-    /// - `context`: The context of the inbound batch.
-    /// - `error_reason`: The error may have occurred processing the inbound batch.
+    /// - `delivery`: Delivery context and conditionally retained input.
+    /// - `error`: A failure that occurred while processing the inbound batch.
     pub fn insert_inbound(
         &mut self,
-        context: Context,
-        error_reason: Option<String>,
+        delivery: PdataDelivery,
+        error: Option<OutboundError>,
     ) -> Option<Key> {
-        if !context.needs_completion_tracking() {
+        if !delivery.context().needs_completion_tracking() {
             // No completion routing or metrics unwinding depends on this context.
             return Some(Key::null());
         }
 
         let inbound = Inbound {
-            context,
+            delivery,
             num_outbound: 0,
-            error_reason,
+            error,
+
+            // initialize to true, can be set to false if/when there are any outbound batch results
+            // that are not a non-permanent Nack
+            outbound_all_transient_errors: true,
         };
 
         self.inbound.allocate(|| (inbound, ())).map(|(key, _)| key)
@@ -103,19 +129,19 @@ impl Contexts {
 
     /// Set an error message on the inbound context associated with this outbound key explaining
     /// why the batch processing failed. Note - this method does not clear the outbound
-    pub fn set_failed_outbound(&mut self, outbound_key: Key, error_reason: String) {
+    pub fn set_failed_outbound(&mut self, outbound_key: Key, error: OutboundError) {
         if let Some(inbound_key) = self.outbound.get(outbound_key).map(|o| o.inbound_key) {
-            self.set_failed_inbound(inbound_key, error_reason);
+            self.set_failed_inbound(inbound_key, error);
         }
     }
 
     /// Set an error message on the inbound context associated with this key explaining why the
     /// batch processing failed.
-    pub fn set_failed_inbound(&mut self, inbound_key: Key, error_reason: String) {
+    pub fn set_failed_inbound(&mut self, inbound_key: Key, error: OutboundError) {
         if let Some(inbound) = self.inbound.get_mut(inbound_key) {
             // keep the original error if it exists
-            if inbound.error_reason.is_none() {
-                inbound.error_reason = Some(error_reason)
+            if inbound.error.is_none() {
+                inbound.error = Some(error)
             }
         }
     }
@@ -127,12 +153,11 @@ impl Contexts {
         self.inbound.cancel(inbound_key);
     }
 
-    /// Clears the outbound slot and returns the context and error reason if the inbound slot is now empty.
+    /// Clears an outbound slot and returns delivery ownership for the last output.
     ///
-    /// Returns `Some((context, error_reason))` if the inbound slot is now empty. This would mean that
-    /// all outbound batches for this inbound slot have been processed and the
-    /// inbound batch can be completed.
-    pub fn clear_outbound(&mut self, outbound_key: Key) -> Option<(Context, Option<String>)> {
+    /// Returns `Some(Inbound)` exactly once, when all outbound batches for this
+    /// inbound slot have been processed and the inbound batch can be completed.
+    pub fn clear_outbound(&mut self, outbound_key: Key) -> Option<Inbound> {
         let inbound_key = {
             let outbound = self.outbound.take(outbound_key)?;
             outbound.inbound_key
@@ -146,9 +171,20 @@ impl Contexts {
 
         if num_outbound == 0 {
             let inbound = self.inbound.take(inbound_key)?;
-            Some((inbound.context, inbound.error_reason))
+            Some(inbound)
         } else {
             None
+        }
+    }
+
+    /// Set the value of `outbound_all_transient_errors` on the inbound context associated with
+    /// this outbound key. This should be set to `false` when any outbound succeeds (is ACk'd) or
+    /// is Nack'd with a permanent error.
+    pub fn set_outbound_all_transient_errors(&mut self, outbound_key: Key, value: bool) {
+        if let Some(inbound_key) = self.outbound.get(outbound_key).map(|o| o.inbound_key)
+            && let Some(inbound) = self.inbound.get_mut(inbound_key)
+        {
+            inbound.outbound_all_transient_errors = value
         }
     }
 }
@@ -156,8 +192,18 @@ impl Contexts {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::pdata::{Context, OtapPdata};
     use crate::testing::create_test_pdata;
+    use otel_arrow_dfe_config::SignalType;
     use std::num::NonZeroUsize;
+
+    fn test_delivery(context: Context, payload: Option<OtapPayload>) -> PdataDelivery {
+        OtapPdata::new(
+            context,
+            payload.unwrap_or_else(|| OtapPayload::empty(SignalType::Logs)),
+        )
+        .into_delivery()
+    }
 
     fn new_contexts() -> Contexts {
         Contexts::new(
@@ -182,12 +228,14 @@ mod test {
         Context::default()
     }
 
+    /// Scenario: an inbound batch has Ack subscribers.
+    /// Guarantees: delivery ownership is retained until its only output completes.
     #[test]
     fn test_with_subscribers() {
         let mut contexts = new_contexts();
         let original_context = create_context_with_subscribers();
         let inbound_key = contexts
-            .insert_inbound(original_context.clone(), None)
+            .insert_inbound(test_delivery(original_context.clone(), None), None)
             .unwrap();
         assert!(
             !inbound_key.is_null(),
@@ -200,17 +248,21 @@ mod test {
             "outbound key should not be null when there are subscribers"
         );
 
-        let (inbound_ctx, error_reason) = contexts.clear_outbound(outbound_key).unwrap();
-        assert_eq!(original_context, inbound_ctx);
-        assert_eq!(error_reason, None);
+        let inbound = contexts.clear_outbound(outbound_key).unwrap();
+        assert_eq!(inbound.delivery.context(), &original_context);
+        assert!(inbound.error.is_none());
+        assert!(inbound.outbound_all_transient_errors);
+        assert!(inbound.delivery.into_pdata().is_empty());
     }
 
+    /// Scenario: an inbound batch has no completion interests.
+    /// Guarantees: neither inbound nor outbound tracking consumes a slot.
     #[test]
     fn test_without_subscribers() {
         let mut contexts = new_contexts();
         let original_context = create_context_without_subscribers();
         let key = contexts
-            .insert_inbound(original_context.clone(), None)
+            .insert_inbound(test_delivery(original_context.clone(), None), None)
             .unwrap();
         assert!(
             key.is_null(),
@@ -225,6 +277,8 @@ mod test {
         assert!(contexts.clear_outbound(outbound_key).is_none());
     }
 
+    /// Scenario: one inbound batch produces several outputs.
+    /// Guarantees: only the final output returns the single inbound completion.
     #[test]
     fn test_insert_multiple_outbounds() {
         let mut contexts = new_contexts();
@@ -232,7 +286,7 @@ mod test {
         // Insert an inbound
         let original_context = create_context_with_subscribers();
         let inbound_key = contexts
-            .insert_inbound(original_context.clone(), None)
+            .insert_inbound(test_delivery(original_context.clone(), None), None)
             .unwrap();
 
         // Insert multiple outbounds
@@ -248,11 +302,15 @@ mod test {
         assert!(contexts.clear_outbound(outbound_key2).is_none());
         assert!(contexts.clear_outbound(outbound_key1).is_none());
 
-        let (inbound_ctx, error_reason) = contexts.clear_outbound(outbound_key3).unwrap();
-        assert_eq!(original_context, inbound_ctx);
-        assert_eq!(error_reason, None);
+        let inbound = contexts.clear_outbound(outbound_key3).unwrap();
+        assert_eq!(inbound.delivery.context(), &original_context);
+        assert!(inbound.error.is_none());
+        assert!(inbound.outbound_all_transient_errors);
+        assert!(inbound.delivery.into_pdata().is_empty());
     }
 
+    /// Scenario: completion references an invalid outbound slot.
+    /// Guarantees: the operation returns None without disturbing other state.
     #[test]
     fn test_clear_outbound_with_invalid_key() {
         let mut contexts = new_contexts();
@@ -261,7 +319,9 @@ mod test {
         let invalid_key = {
             let mut temp_contexts = new_contexts();
             let ctx = create_context_with_subscribers();
-            let inbound_key = temp_contexts.insert_inbound(ctx, None).unwrap();
+            let inbound_key = temp_contexts
+                .insert_inbound(test_delivery(ctx, None), None)
+                .unwrap();
             temp_contexts.insert_outbound(inbound_key).unwrap()
         };
 
@@ -269,6 +329,8 @@ mod test {
         assert!(result.is_none());
     }
 
+    /// Scenario: an inbound batch already has a processing error.
+    /// Guarantees: its final completion retains the original reason and cause.
     #[test]
     fn test_clear_outbound_returns_error_reason() {
         let mut contexts = new_contexts();
@@ -277,23 +339,35 @@ mod test {
         let context = create_context_with_subscribers();
         let error_msg = "pipeline processing failed".to_string();
         let inbound_key = contexts
-            .insert_inbound(context, Some(error_msg.clone()))
+            .insert_inbound(
+                test_delivery(context, None),
+                Some(OutboundError {
+                    reason: error_msg.clone(),
+                    cause: NackCause::Refused,
+                }),
+            )
             .unwrap();
         let outbound_key = contexts.insert_outbound(inbound_key).unwrap();
 
         // Clear outbound and check error is returned
         let result = contexts.clear_outbound(outbound_key);
         assert!(result.is_some());
-        let (_, error_reason) = result.unwrap();
-        assert!(error_reason.is_some());
-        assert_eq!(error_reason.unwrap(), error_msg);
+        let inbound = result.unwrap();
+        assert!(inbound.error.is_some());
+        let inbound_err = inbound.error.unwrap();
+        assert_eq!(inbound_err.reason, error_msg);
+        assert_eq!(inbound_err.cause, NackCause::Refused);
     }
 
+    /// Scenario: the same outbound completes twice.
+    /// Guarantees: its inbound ownership is returned only once.
     #[test]
     fn test_double_clear_same_outbound() {
         let mut contexts = new_contexts();
         let context = create_context_with_subscribers();
-        let inbound_key = contexts.insert_inbound(context, None).unwrap();
+        let inbound_key = contexts
+            .insert_inbound(test_delivery(context, None), None)
+            .unwrap();
         let outbound_key = contexts.insert_outbound(inbound_key).unwrap();
 
         // First clear should succeed
@@ -305,30 +379,45 @@ mod test {
         assert!(result2.is_none());
     }
 
+    /// Scenario: the only output fails.
+    /// Guarantees: its failure is attached to the returned inbound completion.
     #[test]
     fn test_set_failed_single_outbound() {
         let mut contexts = new_contexts();
         let context = create_context_with_subscribers();
-        let inbound_key = contexts.insert_inbound(context, None).unwrap();
+        let inbound_key = contexts
+            .insert_inbound(test_delivery(context, None), None)
+            .unwrap();
         let outbound_key = contexts.insert_outbound(inbound_key).unwrap();
 
         // Set the outbound as failed
         let error_msg = "export failed".to_string();
-        contexts.set_failed_outbound(outbound_key, error_msg.clone());
+        contexts.set_failed_outbound(
+            outbound_key,
+            OutboundError {
+                reason: error_msg.clone(),
+                cause: NackCause::RouteFull,
+            },
+        );
 
         // Clear the outbound and verify error is returned
         let result = contexts.clear_outbound(outbound_key);
         assert!(result.is_some());
-        let (_, error_reason) = result.unwrap();
-        assert!(error_reason.is_some());
-        assert_eq!(error_reason.unwrap(), error_msg);
+        let inbound = result.unwrap();
+        let error = inbound.error.unwrap();
+        assert_eq!(error.reason, error_msg);
+        assert_eq!(error.cause, NackCause::RouteFull)
     }
 
+    /// Scenario: several outputs fail for one inbound batch.
+    /// Guarantees: the first failure reason is preserved until the final completion.
     #[test]
     fn test_set_failed_multiple_outbounds_first_error_wins() {
         let mut contexts = new_contexts();
         let context = create_context_with_subscribers();
-        let inbound_key = contexts.insert_inbound(context, None).unwrap();
+        let inbound_key = contexts
+            .insert_inbound(test_delivery(context, None), None)
+            .unwrap();
 
         let outbound_key1 = contexts.insert_outbound(inbound_key).unwrap();
         let outbound_key2 = contexts.insert_outbound(inbound_key).unwrap();
@@ -336,11 +425,23 @@ mod test {
 
         // Set first outbound as failed
         let error_msg1 = "first error".to_string();
-        contexts.set_failed_outbound(outbound_key1, error_msg1.clone());
+        contexts.set_failed_outbound(
+            outbound_key1,
+            OutboundError {
+                reason: error_msg1.clone(),
+                cause: NackCause::NodeShutdown,
+            },
+        );
 
         // Set second outbound as failed (should be ignored since error_reason is already set)
         let error_msg2 = "second error".to_string();
-        contexts.set_failed_outbound(outbound_key2, error_msg2.clone());
+        contexts.set_failed_outbound(
+            outbound_key2,
+            OutboundError {
+                reason: error_msg2.clone(),
+                cause: NackCause::Unspecified,
+            },
+        );
 
         // Clear all outbounds
         assert!(contexts.clear_outbound(outbound_key1).is_none());
@@ -349,13 +450,10 @@ mod test {
         // When clearing the last outbound, the first error should be returned
         let result = contexts.clear_outbound(outbound_key3);
         assert!(result.is_some());
-        let (_, error_reason) = result.unwrap();
-        assert!(error_reason.is_some());
-        assert_eq!(
-            error_reason.unwrap(),
-            error_msg1,
-            "First error should be preserved"
-        );
+        let inbound = result.unwrap();
+        let error = inbound.error.unwrap();
+        assert_eq!(error.reason, error_msg1, "First error should be preserved");
+        assert_eq!(error.cause, NackCause::NodeShutdown)
     }
 
     /// Scenario: A split input has pipeline metric interests but no Ack/Nack subscriber.
@@ -364,23 +462,25 @@ mod test {
     fn test_with_metrics_only_context() {
         let mut contexts = new_contexts();
         let pdata = create_test_pdata().test_subscribe_to(
-            otel_arrow_dfe_engine::Interests::PRODUCER_METRICS,
+            otel_arrow_dfe_engine::Interests::NODE_OUTPUT_METRICS,
             smallvec::smallvec![],
             1,
         );
         let (original_context, _) = pdata.into_parts();
 
         let inbound_key = contexts
-            .insert_inbound(original_context.clone(), None)
+            .insert_inbound(test_delivery(original_context.clone(), None), None)
             .unwrap();
         assert!(!inbound_key.is_null());
 
         let outbound_key = contexts.insert_outbound(inbound_key).unwrap();
-        let (completed_context, error) = contexts.clear_outbound(outbound_key).unwrap();
-        assert_eq!(completed_context, original_context);
-        assert!(error.is_none());
+        let inbound = contexts.clear_outbound(outbound_key).unwrap();
+        assert_eq!(inbound.delivery.context(), &original_context);
+        assert!(inbound.error.is_none());
     }
 
+    /// Scenario: failure references a stale outbound key.
+    /// Guarantees: no other inbound state is modified.
     #[test]
     fn test_set_failed_with_invalid_key() {
         let mut contexts = new_contexts();
@@ -389,29 +489,49 @@ mod test {
         let invalid_key = {
             let mut temp_contexts = new_contexts();
             let ctx = create_context_with_subscribers();
-            let inbound_key = temp_contexts.insert_inbound(ctx, None).unwrap();
+            let inbound_key = temp_contexts
+                .insert_inbound(test_delivery(ctx, None), None)
+                .unwrap();
             temp_contexts.insert_outbound(inbound_key).unwrap()
         };
 
         // Setting failed with invalid key should not panic
-        contexts.set_failed_outbound(invalid_key, "error".to_string());
+        contexts.set_failed_outbound(
+            invalid_key,
+            OutboundError {
+                reason: "error".to_string(),
+                cause: NackCause::Refused,
+            },
+        );
     }
 
+    /// Scenario: failure references an untracked outbound.
+    /// Guarantees: the null key is ignored safely.
     #[test]
     fn test_set_failed_with_null_key() {
         let mut contexts = new_contexts();
 
         // Create a context without subscribers (results in null key)
         let context = create_context_without_subscribers();
-        let inbound_key = contexts.insert_inbound(context, None).unwrap();
+        let inbound_key = contexts
+            .insert_inbound(test_delivery(context, None), None)
+            .unwrap();
         let outbound_key = contexts.insert_outbound(inbound_key).unwrap();
 
         assert!(outbound_key.is_null());
 
         // Setting failed with null key should not panic
-        contexts.set_failed_outbound(outbound_key, "error".to_string());
+        contexts.set_failed_outbound(
+            outbound_key,
+            OutboundError {
+                reason: "error".to_string(),
+                cause: NackCause::Refused,
+            },
+        );
     }
 
+    /// Scenario: an output fails after the inbound already failed.
+    /// Guarantees: the earlier inbound error remains authoritative.
     #[test]
     fn test_set_failed_does_not_override_inbound_error() {
         let mut contexts = new_contexts();
@@ -420,31 +540,52 @@ mod test {
         // Insert inbound with an initial error
         let inbound_error = "initial inbound error".to_string();
         let inbound_key = contexts
-            .insert_inbound(context, Some(inbound_error.clone()))
+            .insert_inbound(
+                test_delivery(context, None),
+                Some(OutboundError {
+                    reason: inbound_error.clone(),
+                    cause: NackCause::RouteClosed,
+                }),
+            )
             .unwrap();
         let outbound_key = contexts.insert_outbound(inbound_key).unwrap();
 
         // Try to set a different error via set_failed
         let outbound_error = "outbound error".to_string();
-        contexts.set_failed_outbound(outbound_key, outbound_error);
+        contexts.set_failed_outbound(
+            outbound_key,
+            OutboundError {
+                reason: outbound_error,
+                cause: NackCause::Refused,
+            },
+        );
 
         // Clear outbound and verify the original inbound error is preserved
         let result = contexts.clear_outbound(outbound_key);
         assert!(result.is_some());
-        let (_, error_reason) = result.unwrap();
-        assert!(error_reason.is_some());
+        let inbound = result.unwrap();
+        let error = inbound.error.unwrap();
+
         assert_eq!(
-            error_reason.unwrap(),
-            inbound_error,
+            error.reason, inbound_error,
             "Original inbound error should be preserved"
         );
+        assert_eq!(
+            error.cause,
+            NackCause::RouteClosed,
+            "Original inbound error should be preserved"
+        )
     }
 
+    /// Scenario: a completed output is later referenced again.
+    /// Guarantees: its released slot cannot complete or modify the inbound twice.
     #[test]
     fn test_clear_outbound_removes_outbound_from_slotmap() {
         let mut contexts = new_contexts();
         let context = create_context_with_subscribers();
-        let inbound_key = contexts.insert_inbound(context, None).unwrap();
+        let inbound_key = contexts
+            .insert_inbound(test_delivery(context, None), None)
+            .unwrap();
 
         // Create two outbounds
         let outbound_key1 = contexts.insert_outbound(inbound_key).unwrap();
@@ -472,6 +613,110 @@ mod test {
         assert!(
             result3.is_some(),
             "Should complete after clearing the second (and last) outbound"
+        );
+    }
+
+    /// Scenario: An outbound key's transient-errors flag is explicitly set to false.
+    /// Guarantees: The inbound returned from clear_outbound reflects the updated flag value.
+    #[test]
+    fn test_set_outbound_all_transient_errors_to_false() {
+        let mut contexts = new_contexts();
+        let context = create_context_with_subscribers();
+        let inbound_key = contexts
+            .insert_inbound(test_delivery(context, None), None)
+            .unwrap();
+        let outbound_key = contexts.insert_outbound(inbound_key).unwrap();
+
+        // set the flag to false (simulating an ACK or permanent NACK downstream)
+        contexts.set_outbound_all_transient_errors(outbound_key, false);
+
+        let inbound = contexts.clear_outbound(outbound_key).unwrap();
+        assert!(
+            !inbound.outbound_all_transient_errors,
+            "flag should be false after being explicitly set to false"
+        );
+    }
+
+    /// Scenario: set_outbound_all_transient_errors is called with a key from a different
+    /// Contexts instance.
+    /// Guarantees: The call does not panic when the outbound key is not found.
+    #[test]
+    fn test_set_outbound_all_transient_errors_with_invalid_key() {
+        let mut contexts = new_contexts();
+
+        let invalid_key = {
+            let mut temp_contexts = new_contexts();
+            let ctx = create_context_with_subscribers();
+            let inbound_key = temp_contexts
+                .insert_inbound(test_delivery(ctx, None), None)
+                .unwrap();
+            temp_contexts.insert_outbound(inbound_key).unwrap()
+        };
+
+        // should not panic
+        contexts.set_outbound_all_transient_errors(invalid_key, false);
+    }
+
+    /// Scenario: An inbound batch is inserted with an associated payload.
+    /// Guarantees: The payload is preserved and returned when the inbound is completed
+    /// via clear_outbound.
+    #[test]
+    fn test_insert_inbound_with_payload() {
+        let mut contexts = new_contexts();
+        let pdata = create_test_pdata();
+        let (context, payload) = pdata.into_parts();
+
+        // subscribe so context needs completion tracking
+        let pdata = OtapPdata::new(context, payload).test_subscribe_to(
+            otel_arrow_dfe_engine::Interests::ACKS | otel_arrow_dfe_engine::Interests::RETURN_DATA,
+            smallvec::smallvec![otel_arrow_dfe_engine::control::Context8u8::from(1u64)],
+            1,
+        );
+        let (context, payload) = pdata.into_parts();
+
+        let inbound_key = contexts
+            .insert_inbound(test_delivery(context, Some(payload.clone())), None)
+            .unwrap();
+        assert!(!inbound_key.is_null());
+
+        let outbound_key = contexts.insert_outbound(inbound_key).unwrap();
+        let inbound = contexts.clear_outbound(outbound_key).unwrap();
+
+        let returned = inbound.delivery.into_pdata();
+        assert_eq!(
+            returned.signal_type(),
+            payload.signal_type(),
+            "returned payload should match the original"
+        );
+    }
+
+    /// Scenario: Multiple outbounds share one inbound, and set_outbound_all_transient_errors
+    /// is called with false on only one of them.
+    /// Guarantees: The inbound's flag is false after all outbounds are cleared, because
+    /// the flag can only transition from true to false (never back).
+    #[test]
+    fn test_multiple_outbounds_transient_errors_flag_set_false_on_one() {
+        let mut contexts = new_contexts();
+        let context = create_context_with_subscribers();
+        let inbound_key = contexts
+            .insert_inbound(test_delivery(context, None), None)
+            .unwrap();
+
+        let outbound_key1 = contexts.insert_outbound(inbound_key).unwrap();
+        let outbound_key2 = contexts.insert_outbound(inbound_key).unwrap();
+        let outbound_key3 = contexts.insert_outbound(inbound_key).unwrap();
+
+        // only set false on one outbound (e.g. it was ACK'd)
+        contexts.set_outbound_all_transient_errors(outbound_key2, false);
+
+        // clear all outbounds
+        assert!(contexts.clear_outbound(outbound_key1).is_none());
+        assert!(contexts.clear_outbound(outbound_key2).is_none());
+
+        let inbound = contexts.clear_outbound(outbound_key3).unwrap();
+        assert!(
+            !inbound.outbound_all_transient_errors,
+            "flag should be false because at least one outbound set it to false"
         );
     }
 }

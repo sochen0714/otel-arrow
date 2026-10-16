@@ -22,6 +22,24 @@ data.
 > [`src/main.rs`](./src/main.rs) is provided as a means to test and validate
 > OTAP pipelines built using the dataflow engine.
 
+## Release builds
+
+Choose a profile based on binary size, runtime performance, and build time:
+
+- `release`: level `3` optimization with profiling line tables, without
+  cross-crate LTO.
+- `release-perf`: level `3` with fat LTO and one codegen unit to prioritize runtime
+  performance, no debug information, and function symbols retained.
+- `release-size`: level `z` with fat LTO and one codegen unit, no debug information,
+  and function symbols retained to prioritize binary size while supporting
+  diagnostics, accepting possible throughput loss.
+
+Use `profiling` for the same optimizations as `release-perf` with full debug
+information and symbols retained for profiling and debugging.
+
+See [release profiles](docs/release-profiles.md) for build commands, feature
+selection, and measurements with and without Transform.
+
 ## Architecture
 
 ![OTAP Dataflow Engine architecture](docs/images/architecture-high-level.svg)
@@ -157,8 +175,8 @@ All gRPC services are implemented using
 [Tonic](https://github.com/hyperium/tonic).
 
 The major OTAP Dataflow components related to OTAP/OTLP pipeline transport are
-listed next. Their concrete core-node implementations now live in
-`otel-arrow-dfe-core-nodes`.
+listed next. Runtime components live in `otel-arrow-dfe-core-nodes`;
+development-only components live in `otel-arrow-dfe-dev-nodes`.
 
 #### Attributes processor
 
@@ -252,16 +270,28 @@ establish the performance of the OTAP Dataflow system.
 
 [See the core-node catalog.](./crates/core-nodes/README.md)
 
-- Exporters: `console_exporter`, `error_exporter`, `noop_exporter`,
+- Exporters: `console_exporter`, `noop_exporter`,
   `otap_exporter`, `otlp_grpc_exporter`, `otlp_http_exporter`,
-  `parquet_exporter`, `perf_exporter`, `topic_exporter`
+  `parquet_exporter`, `topic_exporter`
 - Processors: `attributes_processor`, `batch_processor`,
-  `content_router`, `debug_processor`, `delay_processor`,
-  `durable_buffer_processor`, `fanout_processor`, `filter_processor`,
-  `retry_processor`, `signal_type_router`, `transform_processor`
+  `content_router`, `debug_processor`, `durable_buffer_processor`,
+  `fanout_processor`, `filter_processor`, `retry_processor`,
+  `signal_type_router`, `transform_processor`
 - Receivers: `host_metrics_receiver`, `internal_telemetry_receiver`,
   `journald_receiver`, `otap_receiver`, `otlp_receiver`,
-  `syslog_cef_receiver`, `topic_receiver`, `traffic_generator`
+  `syslog_cef_receiver`, `topic_receiver`
+
+### Development Nodes
+
+[See the development-node catalog.](./crates/dev-nodes/README.md)
+
+The unpublished `otel-arrow-dfe-dev-nodes` crate contains nodes for testing,
+failure injection, and benchmarking. The default build enables them through
+the `dev-tools` feature.
+
+- Exporters: `error_exporter`, `perf_exporter`
+- Processors: `delay_processor`
+- Receivers: `traffic_generator`
 
 ### Contrib Nodes
 
@@ -376,6 +406,9 @@ embedding binary typically needs:
 - **`system_info`** -- Returns a formatted string with CPU/memory info
   plus all registered component and controller extension URNs, useful for
   `--help` banners or diagnostics.
+- **`shutdown_console_and_exit`** -- Stops the console writers after the
+  run, reports the final status on stderr without waiting on a stalled
+  reader, and exits the process with the run's exit code.
 
 A minimal custom binary looks like this:
 
@@ -385,6 +418,7 @@ use otel_arrow_dfe_controller::{Controller, ControllerRunOptions, startup};
 
 // Side-effect imports to register components via linkme.
 use otel_arrow_dfe_core_nodes as _;
+use otel_arrow_dfe_core_nodes::exporters::console_exporter::claim_structured_stdout;
 // Bring your own contrib/custom nodes as needed.
 // Bring your own controller extension crates the same way.
 
@@ -406,15 +440,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &ControllerRunOptions::default().extensions,
     )?;
 
-    // Print diagnostics.
+    // Print diagnostics on stderr, because stdout may carry `record_json` records.
     // Pass "system" here for the minimal example; in practice, align this
     // string with your binary's allocator feature (e.g. "jemalloc", "mimalloc").
-    println!("{}", startup::system_info(&OTAP_PIPELINE_FACTORY, "system"));
+    eprintln!("{}", startup::system_info(&OTAP_PIPELINE_FACTORY, "system"));
 
-    // Run the engine.
+    // Reserve stdout for records before any pipeline starts; without this, a
+    // `record_json` console exporter fails when it is created.
+    claim_structured_stdout(&cfg);
+
+    // Run the engine, then stop the console writers and exit. The status write
+    // gives up quickly, so a stalled or closed stderr cannot hang the exit.
     let controller = Controller::new(&OTAP_PIPELINE_FACTORY);
-    controller.run_forever(cfg)?;
-    Ok(())
+    let result = controller.run_forever(cfg);
+    startup::shutdown_console_and_exit(&result)
 }
 ```
 

@@ -90,14 +90,14 @@ use otel_arrow_dfe_engine::{
     ProcessorRuntimeRequirements, RouteAdmission, WakeupError,
 };
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
-use otel_arrow_dfe_otap::pdata::OtapPdata;
-use otel_arrow_dfe_pdata::PayloadData;
+use otel_arrow_dfe_otap::pdata::{OtapPdata, PdataEffectHandlerExtension};
 use otel_arrow_dfe_pdata::TryFromWithOptions;
 use otel_arrow_dfe_pdata::otlp::OtlpProtoBytes;
 use otel_arrow_dfe_pdata::views::otap::OtapLogsView;
 use otel_arrow_dfe_pdata::views::otlp::bytes::logs::RawLogsData;
 use otel_arrow_dfe_pdata::views::otlp::bytes::metrics::RawMetricsData;
 use otel_arrow_dfe_pdata::views::otlp::bytes::traces::RawTraceData;
+use otel_arrow_dfe_pdata_codec::{AcceptedEncodings, PdataEncoding, PdataView};
 use otel_arrow_dfe_pdata_views::views::common::{AnyValueView, AttributeView, ValueType};
 use otel_arrow_dfe_pdata_views::views::logs::{LogsDataView, ResourceLogsView};
 use otel_arrow_dfe_pdata_views::views::metrics::{MetricsView, ResourceMetricsView};
@@ -287,12 +287,12 @@ impl ContentRouterConfig {
                 });
             }
         }
-        if let Some(ref default) = self.default_output {
-            if default.trim().is_empty() {
-                return Err(ConfigError::InvalidUserConfig {
-                    error: "default_output must not be empty when specified".to_string(),
-                });
-            }
+        if let Some(ref default) = self.default_output
+            && default.trim().is_empty()
+        {
+            return Err(ConfigError::InvalidUserConfig {
+                error: "default_output must not be empty when specified".to_string(),
+            });
         }
         // Detect case-insensitive key collisions
         if !self.case_sensitive {
@@ -318,18 +318,17 @@ impl ContentRouterConfig {
                     });
                 }
             }
-            if let Some(ref default) = self.default_output {
-                if !declared_outputs
+            if let Some(ref default) = self.default_output
+                && !declared_outputs
                     .iter()
                     .any(|o| o.as_ref() == default.as_str())
-                {
-                    return Err(ConfigError::InvalidUserConfig {
-                        error: format!(
-                            "default_output '{}' references undeclared output port",
-                            default
-                        ),
-                    });
-                }
+            {
+                return Err(ConfigError::InvalidUserConfig {
+                    error: format!(
+                        "default_output '{}' references undeclared output port",
+                        default
+                    ),
+                });
             }
         }
         Ok(())
@@ -387,6 +386,10 @@ pub struct ContentRouter {
     admission: ExclusiveRouteScheduler<OtapPdata, SelectedRouteKind>,
     /// Telemetry metrics.
     metrics: Option<ContentRouterMetrics>,
+    /// Resolved on first use because processors currently receive codec services
+    /// only while processing messages. A future PR will expose the pipeline registry
+    /// at construction so this set can be required instead of optional.
+    accepted_encodings: Option<AcceptedEncodings>,
 }
 
 impl ContentRouter {
@@ -401,6 +404,7 @@ impl ContentRouter {
             case_sensitive: config.case_sensitive,
             admission: ExclusiveRouteScheduler::new(config.admission_policy),
             metrics: None,
+            accepted_encodings: None,
         }
     }
 
@@ -564,34 +568,43 @@ impl ContentRouter {
     }
 
     /// Resolves the output port for a given message payload.
-    fn resolve_route(&self, pdata: &OtapPdata) -> RouteResolution {
+    async fn resolve_route(
+        &self,
+        effect_handler: &local::EffectHandler<OtapPdata>,
+        pdata: &OtapPdata,
+        accepted_encodings: &AcceptedEncodings,
+    ) -> RouteResolution {
         let signal_type = pdata.signal_type();
 
-        match pdata.payload_ref().data() {
-            PayloadData::OtlpBytes(otlp_bytes) => match (signal_type, otlp_bytes) {
-                (SignalType::Logs, OtlpProtoBytes::ExportLogsRequest(bytes)) => {
-                    let data = RawLogsData::new(bytes.as_ref());
+        let view = match effect_handler
+            .view(pdata.payload_ref(), accepted_encodings)
+            .await
+        {
+            Ok(view) => view,
+            Err(_) => return RouteResolution::ConversionError,
+        };
+        match view {
+            PdataView::Encoded(view) => match view.signal_type() {
+                SignalType::Logs => {
+                    let data = RawLogsData::new(view.bytes());
                     self.resolve_logs_route(&data)
                 }
-                (SignalType::Metrics, OtlpProtoBytes::ExportMetricsRequest(bytes)) => {
-                    let data = RawMetricsData::new(bytes.as_ref());
+                SignalType::Metrics => {
+                    let data = RawMetricsData::new(view.bytes());
                     self.resolve_metrics_route(&data)
                 }
-                (SignalType::Traces, OtlpProtoBytes::ExportTracesRequest(bytes)) => {
-                    let data = RawTraceData::new(bytes.as_ref());
+                SignalType::Traces => {
+                    let data = RawTraceData::new(view.bytes());
                     self.resolve_traces_route(&data)
                 }
-                // Defensive: signal_type/payload mismatch cannot occur for OtlpBytes
-                // since signal_type() is derived from the OtlpProtoBytes variant itself.
-                _ => RouteResolution::ConversionError,
             },
-            PayloadData::OtapArrowRecords(arrow_records) => {
+            PdataView::Native(arrow_records) => {
                 match signal_type {
                     // Use native OTAP Arrow view for logs (avoids clone + OTLP round-trip)
-                    SignalType::Logs => self.resolve_arrow_logs_route(arrow_records),
+                    SignalType::Logs => self.resolve_arrow_logs_route(arrow_records.as_ref()),
                     // Metrics/Traces Arrow views not yet available -- convert to OTLP.
                     // TODO: Use OtapMetricsView/OtapTracesView when available.
-                    _ => match OtlpProtoBytes::try_from_with_default(arrow_records.clone()) {
+                    _ => match OtlpProtoBytes::try_from_with_default(arrow_records.into_owned()) {
                         Ok(OtlpProtoBytes::ExportMetricsRequest(bytes)) => {
                             let data = RawMetricsData::new(bytes.as_ref());
                             self.resolve_metrics_route(&data)
@@ -869,9 +882,22 @@ impl local::Processor<OtapPdata> for ContentRouter {
                 _ => Ok(()),
             },
             Message::PData(data) => {
+                if self.accepted_encodings.is_none() {
+                    self.accepted_encodings =
+                        Some(effect_handler.resolve_accepted_encodings(&[PdataEncoding::OTLP])?);
+                }
+                // SAFETY: If absent, the set is stored in Some above; resolution errors
+                // return via `?`. There is no intervening mutation or await.
+                // A future PR will resolve this set at construction and remove this expect.
+                let accepted_encodings = self
+                    .accepted_encodings
+                    .as_ref()
+                    .expect("accepted encodings initialized");
                 // Resolve routing once up front, then handle route-selection
                 // failures separately from downstream admission failures.
-                let resolution = self.resolve_route(&data);
+                let resolution = self
+                    .resolve_route(effect_handler, &data, accepted_encodings)
+                    .await;
 
                 match resolution {
                     RouteResolution::Matched(port) => {
@@ -1024,6 +1050,7 @@ pub fn create_content_router(
 #[distributed_slice(OTAP_PROCESSOR_FACTORIES)]
 pub static CONTENT_ROUTER_FACTORY: ProcessorFactory<OtapPdata> = ProcessorFactory {
     name: CONTENT_ROUTER_URN,
+    context_declarations: None,
     wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
     validate_config: otel_arrow_dfe_config::validation::validate_typed_config::<ContentRouterConfig>,
     create:
@@ -2282,8 +2309,13 @@ mod tests {
                 let (tx, rx) = mpsc::Channel::new(4);
                 let mut senders = HashMap::new();
                 let _ = senders.insert("tenant_a".into(), Sender::Local(LocalSender::mpsc(tx)));
-                let mut eh =
-                    LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
+                let mut eh = LocalEffectHandler::new(
+                    node_id.clone(),
+                    senders,
+                    None,
+                    reporter.clone(),
+                    otel_arrow_dfe_engine::testing::test_pipeline_runtime_services(),
+                );
 
                 let bytes = create_logs_with_resource_attr("service.namespace", "/sub/a");
                 let pdata = OtapPdata::new_default(OtlpProtoBytes::ExportLogsRequest(bytes).into());
@@ -2348,8 +2380,13 @@ mod tests {
                 let mut router = ContentRouter::with_pipeline_ctx(pipeline, config);
 
                 let senders = HashMap::new();
-                let mut eh =
-                    LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
+                let mut eh = LocalEffectHandler::new(
+                    node_id.clone(),
+                    senders,
+                    None,
+                    reporter.clone(),
+                    otel_arrow_dfe_engine::testing::test_pipeline_runtime_services(),
+                );
 
                 let bytes = create_logs_with_resource_attr("service.namespace", "/sub/unknown");
                 let pdata = OtapPdata::new_default(OtlpProtoBytes::ExportLogsRequest(bytes).into());
@@ -2413,8 +2450,13 @@ mod tests {
                 let (tx, rx) = mpsc::Channel::new(4);
                 let mut senders = HashMap::new();
                 let _ = senders.insert("fallback".into(), Sender::Local(LocalSender::mpsc(tx)));
-                let mut eh =
-                    LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
+                let mut eh = LocalEffectHandler::new(
+                    node_id.clone(),
+                    senders,
+                    None,
+                    reporter.clone(),
+                    otel_arrow_dfe_engine::testing::test_pipeline_runtime_services(),
+                );
 
                 // Send with non-matching route - should go to default
                 let bytes = create_logs_with_resource_attr("service.namespace", "/sub/unknown");
@@ -2487,8 +2529,13 @@ mod tests {
                     .expect("prefill should occupy the downstream route");
                 let mut senders = HashMap::new();
                 let _ = senders.insert("tenant_c".into(), Sender::Local(LocalSender::mpsc(tx)));
-                let mut eh =
-                    LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
+                let mut eh = LocalEffectHandler::new(
+                    node_id.clone(),
+                    senders,
+                    None,
+                    reporter.clone(),
+                    otel_arrow_dfe_engine::testing::test_pipeline_runtime_services(),
+                );
                 let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(4);
                 eh.set_pipeline_completion_msg_sender(completion_tx);
 
@@ -2570,8 +2617,13 @@ mod tests {
                 drop(rx);
                 let mut senders = HashMap::new();
                 let _ = senders.insert("tenant_c".into(), Sender::Local(LocalSender::mpsc(tx)));
-                let mut eh =
-                    LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
+                let mut eh = LocalEffectHandler::new(
+                    node_id.clone(),
+                    senders,
+                    None,
+                    reporter.clone(),
+                    otel_arrow_dfe_engine::testing::test_pipeline_runtime_services(),
+                );
                 let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(4);
                 eh.set_pipeline_completion_msg_sender(completion_tx);
 
@@ -2654,8 +2706,13 @@ mod tests {
                     .expect("prefill should occupy the default route");
                 let mut senders = HashMap::new();
                 let _ = senders.insert("fallback".into(), Sender::Local(LocalSender::mpsc(tx)));
-                let mut eh =
-                    LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
+                let mut eh = LocalEffectHandler::new(
+                    node_id.clone(),
+                    senders,
+                    None,
+                    reporter.clone(),
+                    otel_arrow_dfe_engine::testing::test_pipeline_runtime_services(),
+                );
                 let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(4);
                 eh.set_pipeline_completion_msg_sender(completion_tx);
 
@@ -2736,8 +2793,13 @@ mod tests {
                 drop(rx);
                 let mut senders = HashMap::new();
                 let _ = senders.insert("fallback".into(), Sender::Local(LocalSender::mpsc(tx)));
-                let mut eh =
-                    LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
+                let mut eh = LocalEffectHandler::new(
+                    node_id.clone(),
+                    senders,
+                    None,
+                    reporter.clone(),
+                    otel_arrow_dfe_engine::testing::test_pipeline_runtime_services(),
+                );
                 let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(4);
                 eh.set_pipeline_completion_msg_sender(completion_tx);
 
@@ -2833,8 +2895,13 @@ mod tests {
                     "tenant_a".into(),
                     Sender::Local(LocalSender::mpsc(tx_healthy)),
                 );
-                let mut eh =
-                    LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
+                let mut eh = LocalEffectHandler::new(
+                    node_id.clone(),
+                    senders,
+                    None,
+                    reporter.clone(),
+                    otel_arrow_dfe_engine::testing::test_pipeline_runtime_services(),
+                );
                 let (completion_tx, mut completion_rx) = pipeline_completion_msg_channel(4);
                 eh.set_pipeline_completion_msg_sender(completion_tx);
 

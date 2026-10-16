@@ -100,12 +100,11 @@ use otel_arrow_dfe_quiver::{
 use smallvec::smallvec;
 
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
-use otel_arrow_dfe_otap::pdata::OtapPdata;
-use otel_arrow_dfe_pdata::TryIntoWithOptions;
+use otel_arrow_dfe_otap::pdata::{OtapPdata, PdataEffectHandlerExtension};
 
 use bundle_adapter::{
-    OtapRecordBundleAdapter, OtlpBytesAdapter, convert_bundle_to_pdata, recover_item_count,
-    signal_type_from_slot_id,
+    OtapRecordBundleAdapter, OtlpBytesAdapter, convert_bundle_to_pdata, recover_byte_count,
+    recover_item_count, signal_type_from_slot_id,
 };
 pub use config::{DurableBufferConfig, OtlpHandling, SizeCapPolicy};
 use deferred_retry_state::DeferredRetryState;
@@ -133,7 +132,7 @@ use otel_arrow_dfe_engine::{
     ConsumerEffectHandlerExtension, Interests, LocalWakeupRequirements, ProcessorFactory,
     ProcessorRuntimeRequirements, ProducerEffectHandlerExtension,
 };
-use otel_arrow_dfe_pdata::{OtapArrowRecords, OtapPayload, PayloadData};
+use otel_arrow_dfe_pdata_codec::OtapPayload;
 #[cfg(test)]
 use otel_arrow_dfe_telemetry::common_attributes::SignalAttributes;
 
@@ -271,6 +270,9 @@ fn retention_loss_delta(
             bundles: current.bundles.saturating_sub(previous.bundles),
             items: current.items.saturating_sub(previous.items),
             bytes: current.bytes.saturating_sub(previous.bytes),
+            reclaimed_bytes: current
+                .reclaimed_bytes
+                .saturating_sub(previous.reclaimed_bytes),
         }
     }
 
@@ -802,13 +804,23 @@ impl DurableBuffer {
         let loss_delta = retention_loss_delta(current_loss_snapshot, self.last_loss_snapshot);
         self.last_loss_snapshot = current_loss_snapshot;
 
+        let dropped_reclaimed = self.metrics.reclaimed_for(LossReason::DropOldest);
+        dropped_reclaimed
+            .segments
+            .add(loss_delta.drop_oldest.segments);
+        dropped_reclaimed
+            .bytes
+            .add(loss_delta.drop_oldest.reclaimed_bytes);
         let dropped = self.metrics.loss_for(LossReason::DropOldest);
-        dropped.segments.add(loss_delta.drop_oldest.segments);
         dropped.bundles.add(loss_delta.drop_oldest.bundles);
         dropped.bytes.add(loss_delta.drop_oldest.bytes);
 
+        let expired_reclaimed = self.metrics.reclaimed_for(LossReason::Expired);
+        expired_reclaimed.segments.add(loss_delta.expired.segments);
+        expired_reclaimed
+            .bytes
+            .add(loss_delta.expired.reclaimed_bytes);
         let expired = self.metrics.loss_for(LossReason::Expired);
-        expired.segments.add(loss_delta.expired.segments);
         expired.bundles.add(loss_delta.expired.bundles);
         expired.bytes.add(loss_delta.expired.bytes);
 
@@ -896,6 +908,7 @@ impl DurableBuffer {
         let engine = QuiverEngine::builder(quiver_config)
             .with_budget(budget)
             .with_wal_item_counter(Arc::new(recover_item_count))
+            .with_wal_byte_counter(Arc::new(recover_byte_count))
             .build()
             .await
             .map_err(|e| Error::InternalError {
@@ -964,26 +977,19 @@ impl DurableBuffer {
         data: OtapPdata,
         effect_handler: &mut EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
-        let (context, payload) = data.into_parts();
-
-        // Capture signal type before consuming the payload
-        let signal_type = payload.signal_type();
+        let signal_type = data.signal_type();
 
         // Get the engine reference - NACK with original payload if unavailable
         let engine = match self.engine() {
-            Ok((engine, _)) => engine,
+            Ok((engine, _)) => Arc::clone(engine),
             Err(e) => {
                 self.metrics
                     .ingest_for(IngestFailure::Error)
                     .failures
                     .add(1);
                 otel_error!("durable_buffer.engine.unavailable", error = %e);
-                let nack_pdata = OtapPdata::new(context, payload);
                 effect_handler
-                    .notify_nack(NackMsg::new(
-                        format!("engine not available: {}", e),
-                        nack_pdata,
-                    ))
+                    .notify_nack(NackMsg::new(format!("engine not available: {}", e), data))
                     .await?;
                 return Ok(());
             }
@@ -991,95 +997,68 @@ impl DurableBuffer {
 
         // Ingest based on payload type and configuration.
         // Adapters preserve the original payload via into_inner() for NACK on failure.
-        // Returns (Result, item_count) - item count tracks individual items for all formats.
-        let (ingest_result, item_count): (Result<(), _>, u64) = match payload.into_data() {
-            PayloadData::OtlpBytes(otlp_bytes) => {
-                // OTLP bytes: check configuration for handling mode
-                match self.config.otlp_handling {
-                    OtlpHandling::PassThrough => {
-                        // Store as opaque binary for efficient pass-through.
-                        // Item count is computed once inside the adapter constructor
-                        // (protobuf wire-format scan, no full deserialization) and cached.
-                        match OtlpBytesAdapter::new(otlp_bytes) {
-                            Ok(adapter) => {
-                                let num_items = adapter.cached_item_count();
-                                let result = match engine.ingest(&adapter).await {
-                                    Ok(()) => Ok(()),
-                                    Err(e) => Err((e, OtapPayload::from(adapter.into_inner()))),
-                                };
-                                (result, num_items)
-                            }
-                            Err((e, original_bytes)) => {
-                                // Adapter creation failed - NACK with original bytes
-                                self.metrics
-                                    .ingest_for(IngestFailure::Error)
-                                    .failures
-                                    .add(1);
-                                otel_error!("durable_buffer.otlp.adapter_failed", error = %e);
-
-                                let nack_pdata =
-                                    OtapPdata::new(context, OtapPayload::from(original_bytes));
-                                effect_handler
-                                    .notify_nack(NackMsg::new(
-                                        format!("OTLP adapter creation failed: {}", e),
-                                        nack_pdata,
-                                    ))
-                                    .await?;
-                                return Ok(());
-                            }
-                        }
+        // Preserve the existing durable OTLP format in pass-through mode. Other
+        // inputs use recoverable native conversion before Arrow storage.
+        let (context, ingest_result, item_count): (_, Result<(), _>, u64) =
+            if matches!(self.config.otlp_handling, OtlpHandling::PassThrough)
+                && data.payload_ref().encoding()
+                    == Some(&otel_arrow_dfe_pdata_codec::PdataEncoding::OTLP)
+            {
+                let (context, payload) = data.into_parts();
+                let otlp_bytes = otel_arrow_dfe_pdata::OtlpProtoBytes::new_from_bytes(
+                    signal_type,
+                    payload
+                        .into_encoded_bytes()
+                        .expect("OTLP format must contain encoded bytes"),
+                );
+                match OtlpBytesAdapter::new(otlp_bytes) {
+                    Ok(adapter) => {
+                        let num_items = adapter.cached_item_count();
+                        let result = engine
+                            .ingest(&adapter)
+                            .await
+                            .map_err(|error| (error, OtapPayload::from(adapter.into_inner())));
+                        (context, result, num_items)
                     }
-                    OtlpHandling::ConvertToArrow => {
-                        // Convert to Arrow for queryability.
-                        // Clone bytes for NACK on conversion failure (conversion consumes the input).
-                        let bytes_for_nack = otlp_bytes.clone();
-                        let conversion_result: Result<OtapArrowRecords, _> =
-                            OtapPayload::from(otlp_bytes).try_into_with_default();
-                        match conversion_result {
-                            Ok(records) => {
-                                // Count items from Arrow data (cheap - just num_rows)
-                                let num_items = records.num_items() as u64;
-                                let adapter = OtapRecordBundleAdapter::new(records);
-                                let result = match engine.ingest(&adapter).await {
-                                    Ok(()) => Ok(()),
-                                    // Ingest failed: NACK with the Arrow records we tried to store
-                                    Err(e) => Err((e, OtapPayload::from(adapter.into_inner()))),
-                                };
-                                (result, num_items)
-                            }
-                            Err(e) => {
-                                // Conversion failed - NACK with original bytes so upstream can retry
-                                self.metrics
-                                    .ingest_for(IngestFailure::Error)
-                                    .failures
-                                    .add(1);
-                                otel_error!("durable_buffer.otlp.conversion_failed", error = %e);
-
-                                let nack_pdata =
-                                    OtapPdata::new(context, OtapPayload::from(bytes_for_nack));
-                                effect_handler
-                                    .notify_nack(NackMsg::new(
-                                        format!("OTLP to Arrow conversion failed: {}", e),
-                                        nack_pdata,
-                                    ))
-                                    .await?;
-                                return Ok(());
-                            }
-                        }
+                    Err((error, original_bytes)) => {
+                        self.metrics
+                            .ingest_for(IngestFailure::Error)
+                            .failures
+                            .add(1);
+                        otel_error!("durable_buffer.otlp.adapter_failed", error = %error);
+                        effect_handler
+                            .notify_nack(NackMsg::new(
+                                format!("OTLP adapter creation failed: {error}"),
+                                OtapPdata::new(context, OtapPayload::from(original_bytes)),
+                            ))
+                            .await?;
+                        return Ok(());
                     }
                 }
-            }
-            PayloadData::OtapArrowRecords(records) => {
-                // Native Arrow data: count items (cheap) and store directly.
-                let num_items = records.num_items() as u64;
-                let adapter = OtapRecordBundleAdapter::new(records);
-                let result = match engine.ingest(&adapter).await {
-                    Ok(()) => Ok(()),
-                    Err(e) => Err((e, OtapPayload::from(adapter.into_inner()))),
+            } else {
+                let arrow_pdata = match effect_handler.materialize_otap(data).await {
+                    Ok(arrow_pdata) => arrow_pdata,
+                    Err(error) => {
+                        self.metrics
+                            .ingest_for(IngestFailure::Error)
+                            .failures
+                            .add(1);
+                        let (error, pdata) = error.into_parts();
+                        effect_handler
+                            .notify_nack(NackMsg::new_permanent(error.to_string(), pdata))
+                            .await?;
+                        return Ok(());
+                    }
                 };
-                (result, num_items)
-            }
-        };
+                let (context, records) = arrow_pdata.into_parts();
+                let item_count = records.num_items() as u64;
+                let adapter = OtapRecordBundleAdapter::new(records);
+                let result = engine
+                    .ingest(&adapter)
+                    .await
+                    .map_err(|error| (error, OtapPayload::from(adapter.into_inner())));
+                (context, result, item_count)
+            };
 
         // Handle ingest result
         match ingest_result {
@@ -1869,6 +1848,7 @@ pub fn create_durable_buffer(
 pub static DURABLE_BUFFER_FACTORY: ProcessorFactory<OtapPdata> = ProcessorFactory {
     name: DURABLE_BUFFER_URN,
     create: create_durable_buffer,
+    context_declarations: None,
     wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
     validate_config: otel_arrow_dfe_config::validation::validate_typed_config::<DurableBufferConfig>,
 };
@@ -1895,6 +1875,7 @@ mod tests {
         fingerprint: SchemaFingerprint,
         primary_slot: SlotId,
         item_count: u64,
+        byte_count: u64,
     }
 
     impl RecordBundle for SimpleBundle {
@@ -1919,6 +1900,10 @@ mod tests {
 
         fn item_count(&self) -> u64 {
             self.item_count
+        }
+
+        fn byte_count(&self) -> Option<u64> {
+            Some(self.byte_count)
         }
     }
 
@@ -1962,6 +1947,7 @@ mod tests {
             vec![Arc::new(Int32Array::from(vec![1]))],
         )
         .expect("valid batch");
+        let byte_count = batch.get_array_memory_size() as u64;
 
         // Include shared slots (ResourceAttrs=1, ScopeAttrs=2) alongside the
         // primary signal slot, mirroring real OTAP bundles. This ensures
@@ -1977,6 +1963,7 @@ mod tests {
             fingerprint: [0x11u8; 32],
             primary_slot,
             item_count,
+            byte_count,
         }
     }
 
@@ -2882,7 +2869,7 @@ mod tests {
         assert_eq!(
             processor
                 .metrics
-                .loss_metrics
+                .reclaimed_metrics
                 .get(LossAttributes {
                     reason: LossReason::Expired,
                 })
@@ -2902,8 +2889,8 @@ mod tests {
         assert_eq!(sample(&mut processor), (4, 0));
     }
 
-    /// Scenario: Segment, bundle, and byte loss occur in separate reporting intervals.
-    /// Guarantees: Each reason-only aggregate counter reports its delta and resets after export.
+    /// Scenario: Physical reclamation and logical loss occur in separate reporting intervals.
+    /// Guarantees: Each reason-only counter reports its delta and resets after export.
     #[tokio::test]
     async fn test_aggregate_loss_metrics_are_delta_counters() {
         let (mut processor, engine, subscriber_id, _temp_dir) =
@@ -2915,16 +2902,24 @@ mod tests {
             let dropped = processor.metrics.loss_metrics.get(LossAttributes {
                 reason: LossReason::DropOldest,
             });
+            let dropped_reclaimed = processor.metrics.reclaimed_metrics.get(LossAttributes {
+                reason: LossReason::DropOldest,
+            });
             let dropped_values = (
-                dropped.segments.get(),
+                dropped_reclaimed.segments.get(),
+                dropped_reclaimed.bytes.get(),
                 dropped.bundles.get(),
                 dropped.bytes.get(),
             );
             let expired = processor.metrics.loss_metrics.get(LossAttributes {
                 reason: LossReason::Expired,
             });
+            let expired_reclaimed = processor.metrics.reclaimed_metrics.get(LossAttributes {
+                reason: LossReason::Expired,
+            });
             let expired_values = (
-                expired.segments.get(),
+                expired_reclaimed.segments.get(),
+                expired_reclaimed.bytes.get(),
                 expired.bundles.get(),
                 expired.bytes.get(),
             );
@@ -2932,13 +2927,18 @@ mod tests {
             reporter
                 .report_measurement(&mut processor.metrics.loss_metrics)
                 .expect("report loss metrics");
+            reporter
+                .report_measurement(&mut processor.metrics.reclaimed_metrics)
+                .expect("report reclaimed metrics");
             while metrics_rx.try_recv().is_ok() {}
 
             (dropped_values, expired_values)
         };
 
+        let dropped_bundle = make_simple_bundle(SlotId::new(30), 5);
+        let dropped_logical_bytes = dropped_bundle.byte_count().expect("logical byte count");
         engine
-            .ingest(&make_simple_bundle(SlotId::new(30), 5))
+            .ingest(&dropped_bundle)
             .await
             .expect("ingest dropped bundle");
         engine.flush().await.expect("flush dropped bundle");
@@ -2955,10 +2955,15 @@ mod tests {
             })
             .expect("oldest segment");
         assert_eq!(engine.force_drop_oldest_pending_segments(), 1);
-        assert_eq!(sample(&mut processor), ((1, 1, dropped_bytes), (0, 0, 0)));
+        assert_eq!(
+            sample(&mut processor),
+            ((1, dropped_bytes, 1, dropped_logical_bytes), (0, 0, 0, 0))
+        );
 
+        let expired_bundle = make_simple_bundle(SlotId::new(30), 3);
+        let expired_logical_bytes = expired_bundle.byte_count().expect("logical byte count");
         engine
-            .ingest(&make_simple_bundle(SlotId::new(30), 3))
+            .ingest(&expired_bundle)
             .await
             .expect("ingest expired bundle");
         engine.flush().await.expect("flush expired bundle");
@@ -2978,9 +2983,12 @@ mod tests {
             engine.cleanup_expired_segments().expect("expire segment"),
             1
         );
-        assert_eq!(sample(&mut processor), ((0, 0, 0), (1, 1, expired_bytes)));
+        assert_eq!(
+            sample(&mut processor),
+            ((0, 0, 0, 0), (1, expired_bytes, 1, expired_logical_bytes))
+        );
 
-        assert_eq!(sample(&mut processor), ((0, 0, 0), (0, 0, 0)));
+        assert_eq!(sample(&mut processor), ((0, 0, 0, 0), (0, 0, 0, 0)));
     }
 
     /// Scenario: DropOldest removes a metrics bundle containing 42 items.
