@@ -11,7 +11,7 @@ x-dataflow-build: &dataflow-build
     otel-arrow: ../../../../..
   args:
     TARGETPLATFORM: linux/amd64
-    FEATURES: kafka-receiver,kafka-exporter
+    FEATURES: kafka
 
 services:
   producer:

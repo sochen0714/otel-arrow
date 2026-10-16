@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM docker.io/rust:1.97 AS dataflow-build
+FROM --platform=$BUILDPLATFORM docker.io/rust:1.99@sha256:3745c050d12adc738eff16ebfc81ed044bfb2cc27c6828850ff1666beb1c7a49 AS dataflow-build
 
 WORKDIR /build/rust/dataflow
 
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y clang libclang-dev protobuf-compiler
 
 COPY --from=otel-arrow /proto/opentelemetry/proto /build/proto/opentelemetry/proto
 COPY --from=otel-arrow /proto/opentelemetry-proto /build/proto/opentelemetry-proto
-COPY --from=otel-arrow /rust/experimental /build/rust/experimental
+COPY --from=otel-arrow /rust/contrib /build/rust/contrib
 COPY --from=otel-arrow /THIRD_PARTY_NOTICES.txt /build/THIRD_PARTY_NOTICES.txt
 
 COPY . /build/rust/dataflow/.
