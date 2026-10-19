@@ -6,6 +6,66 @@ validates **initial acquisition** by the real
 the existing [SASL/TLS example](../sasl-tls/README.md)'s broker.
 It does not use a fake credential provider or an older prebuilt engine.
 
+## Test workflow
+
+```mermaid
+flowchart TB
+  harness["PowerShell test harness<br/>Test-FlatFileSasl.ps1"]
+  build["Shared Dockerfile.dataflow<br/>kafka + flat-file-sasl-auth<br/>Source revision and binary hash"]
+  config["Pipeline configuration<br/>Inline username or username_file<br/>No inline receiver credentials"]
+  files["Read-only credential files<br/>Username and password<br/>Valid, missing, malformed, empty, or wrong"]
+
+  subgraph project["Unique Compose project: private network, no host ports"]
+    certgen["certgen service<br/>Existing SASL/TLS certificate script"]
+    certs[("Certificate volume<br/>Local CA and broker keystore")]
+    producer["Kafka CLI producer<br/>Three known UTF-8 records"]
+    broker["Kafka broker<br/>PLAIN over SASL_SSL<br/>kafka:9093"]
+    topic[("flat-file-sasl-logs<br/>One partition, three records")]
+
+    subgraph engine["receiver service: real df_engine pipeline"]
+      extension["Flat-file SASL auth extension<br/>urn:otel:extension:flat_file_sasl_auth"]
+      receiver["Kafka receiver<br/>credential_source: capability<br/>Verified TLS, plaintext log decoding"]
+      console["Console exporter<br/>record_json"]
+    end
+  end
+
+  output["Observed output<br/>Decoded log bodies, safe diagnostics<br/>Receiver process exit status"]
+  assertions["Harness assertions<br/>Exact three bodies for both positive configs<br/>No output or secret leakage for negatives<br/>Selected username file never falls back"]
+  evidence["Sanitized evidence<br/>Provenance, results, logs, command audit"]
+  cleanup["Finally: scoped cleanup<br/>Remove own containers, network, certificates<br/>Delete generated credential files"]
+
+  harness --> build
+  build -.-> engine
+  harness --> config
+  harness --> files
+  harness -. "Start isolated services" .-> certgen
+  certgen --> certs
+  certs --> broker
+  certs -. "Trusted CA" .-> receiver
+  harness --> producer
+  certs -. "Trusted CA" .-> producer
+  producer -->|"Authenticated TLS publish"| broker
+  broker --> topic
+  config --> extension
+  files --> extension
+  extension -->|"sasl_credential_provider binding"| receiver
+  topic -->|"Authenticated TLS consume"| receiver
+  receiver -->|"OpenTelemetry log records"| console
+  console --> output
+  extension -. "Acquisition failures" .-> output
+  receiver -. "Authentication failures" .-> output
+  output --> assertions
+  assertions --> evidence
+  harness -. "Success or failure" .-> cleanup
+```
+
+Solid arrows show build, configuration, credential, and telemetry flow; dashed
+arrows show orchestration, trust inputs, and failure observations. The harness
+runs each case separately with a fresh consumer group. Positive cases must
+deliver the exact expected bodies; negative cases must fail safely without
+delivering records. Evidence is retained even when a case fails, and cleanup
+is limited to that invocation's resources.
+
 ## Run
 
 Prerequisites: PowerShell 7+, Git, Docker with Compose v2/buildx, and the
