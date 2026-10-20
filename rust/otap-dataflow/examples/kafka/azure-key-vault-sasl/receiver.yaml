@@ -15,8 +15,7 @@ groups:
               vault_url: __VAULT_URL_JSON__
               username_secret: __USERNAME_SECRET_JSON__
               password_secret: __PASSWORD_SECRET_JSON__
-              identity:
-                method: development
+              identity: __IDENTITY_JSON__
               startup_timeout: __STARTUP_TIMEOUT_JSON__
         nodes:
           kafka:

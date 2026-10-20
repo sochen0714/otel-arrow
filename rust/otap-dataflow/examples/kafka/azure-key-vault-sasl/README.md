@@ -1,9 +1,10 @@
 # Azure Key Vault SASL: receiver E2E harness
 
-**Prepared, not live-validated.** Do not build or execute until the parent
-hands off the final production/SDK commits, releases its constrained workspace
-check, and the user completes Azure sign-in in the dedicated Docker volume.
-This branch contains validation only, not production receiver changes.
+**Integrated, not live-validated.** The parent handed off the final production
+source and released its heavy-build hold. Source/image builds may proceed;
+live AKV cases are prerequisite-blocked pending an approved identity route.
+This branch contains the net feature integration for validation, not
+production receiver implementation changes.
 See [VALIDATION.md](VALIDATION.md) for the current evidence boundary.
 
 This reuses the flat-file SASL harness at
@@ -17,12 +18,14 @@ now has a two-job default to limit compiler concurrency.
 
 The real `df_engine` is built from the exact integrated checkout with
 `kafka,azure-key-vault-sasl-auth`. A development-only Debian image adds Azure
-CLI to that unchanged executable. Debian Trixie matches the shared engine
-image's glibc generation; copying this executable into an Azure Linux 3 image
+CLI to that unchanged executable for private broker provisioning. Debian
+Trixie matches the shared engine image's glibc generation; copying this
+executable into an Azure Linux 3 image
 would risk a glibc mismatch. The official Azure CLI image is used separately
 for interactive login. CLI is never added to a production image.
 
-The runtime path is real container identity -> real Key Vault SDK reads ->
+The primary runtime path is approved VM managed identity ->
+real Key Vault SDK reads ->
 `urn:otel:extension:azure_key_vault_sasl_auth` -> receiver capability binding ->
 real Kafka PLAIN over verified SASL_SSL -> plaintext log decoding -> console
 `record_json`. Both secrets must be acquired before provider readiness. There
@@ -46,54 +49,94 @@ The spelling `credentials: capability` is not valid for this receiver.
 
 ## Execution prerequisites
 
-The parent must supply the exact final production commit(s), including the
-unmodified official Azure SDK revision
-`e1f93542648359690c640935f271f49a66dccc25`. Integrate only that explicit
-handoff into this validation branch, resolve any instructed integration, and
-commit the complete checkout. Do not use the old vendored draft, beta2,
-patched/fake binaries, or a wholesale merge of the fork.
+The handed-off production commit is
+`b455560661d4610e6d10237000e3c0f6628663f1`, with unmodified official Azure SDK
+revision `e1f93542648359690c640935f271f49a66dccc25`. Its net diff from production
+base `4242bc8ab80d0f49e33ce7ce3c1763eb8a7bab8d` is integrated onto this branch's
+newer-main baseline, retaining its package versions and component IDs.
+The resulting validation source SHA is intentionally different from the
+production commit. Do not use the old vendored draft, beta2, patched/fake
+binaries, or a wholesale merge of the fork.
 
-Required tools: PowerShell 7+, Git, Docker Desktop's Linux engine with Compose
-v2/buildx, and the pinned protobuf submodule:
+Required tools: PowerShell 7+, Git, Docker Linux with Compose v2/buildx, and the
+pinned protobuf submodule. The prepared image targets Linux/amd64:
 
 ```powershell
 git submodule update --init proto/opentelemetry-proto
 ```
 
-Do not run builds while the parent's bounded workspace check is running.
+The parent's bounded workspace check has ended.
 The first actual engine build can take tens of minutes. Build jobs default
 to two, but adequate Docker disk, memory, and paging space are still required.
 No whole-workspace success is implied by harness preparation.
 
-The chosen user account must already have read access to both selected
+The selected runtime identity must already have read access to both selected
 secrets and network reachability from Docker. Use **Key Vault Secrets User**
 for an existing RBAC vault, or **Secrets Get** for an existing legacy access
 policy vault. Do not switch permission models or alter resources, RBAC,
 policies, secrets, firewall, subscriptions, or app registrations for this test.
 The vault's actual permission and network model has not been verified.
+The attempted local sign-in was blocked by an identity access policy, not a
+Key Vault SDK/data-plane failure. Do not retry alternate login flows, export
+token caches, or weaken policy. An identity-admin-approved runtime/identity
+route is required before any token/secret preflight or live test. The user
+selected an existing Azure VM with managed identity; target/access and its
+existing identity selection must be handed off privately before execution.
 
-### User-operated container sign-in
+### Approved VM managed identity
+
+The VM recipe requires an approved Linux/amd64 VM with Docker and PowerShell
+7. Do not connect, install tools remotely, or probe IMDS until its target,
+access channel, and execution scope are explicitly released by the parent.
+Keep VM, subscription, identity, account, and vault identifiers in ignored
+runtime inputs/private handoff, never committed documentation or evidence.
+
+Confirm the VM's **existing** identity: explicitly select
+`{"method":"managed_identity"}` for its system-assigned identity, or also set
+`"client_id":"<existing-user-assigned-client-id>"` for the selected existing
+user-assigned identity. Do not guess which exists or enable/change an identity.
+The runtime file must supply the identity block; the harness does not silently
+default it from a developer environment.
+
+Base Compose mounts no CLI/user login cache. On that approved VM only, the
+private bootstrap logs into CLI with `--identity --allow-no-subscriptions`
+and output disabled, then provisions the private broker. Its cache is
+container-local and deleted with that container. The receiver independently
+uses the real SDK `ManagedIdentityCredential`, not CLI tokens, a forwarded
+user cache, or an identity proxy. Both use the same explicit client-ID selection.
+IMDS is excluded from proxy routing; actual container reachability must be
+approved. Do not modify VM identity, firewall, routing, or IAM to make it work.
+
+### Optional development mode: prerequisite-blocked
 
 Host Windows `az login` does **not** authenticate the collector container.
-After Docker Desktop is running, the user runs these commands themselves:
+The parent has prepared the dedicated login volume, but local access is
+policy-blocked. Do not recreate/delete it. The commands below document the
+local recipe only; use them only if that exact flow is subsequently approved.
+The user, not the harness, performs interactive sign-in:
 
 ```powershell
-docker volume create otap-akv-e2e-login
+docker volume inspect otap-akv-e2e-login --format '{{.Name}}'
 docker run --rm -it `
   --mount type=volume,source=otap-akv-e2e-login,target=/root/.azure `
   --env AZURE_CONFIG_DIR=/root/.azure `
   --env AZURE_CORE_COLLECT_TELEMETRY=no `
-  mcr.microsoft.com/azure-cli:azurelinux3.0 `
+  mcr.microsoft.com/azure-cli@sha256:933eb8dcb81aecb6f77e03c5b8660f0a1dfa9e1d16525763a27f86ff3b83a044 `
   az login --use-device-code
 ```
 
 The user follows the CLI's interactive instructions privately. Do not paste
 codes or tokens into chat, logs, configuration, or evidence. Do not mount/copy
 the host's general `.azure` directory, bake tokens into images, or run
-`az account get-access-token` as a preflight. The script never initiates login.
+`az account get-access-token` as a preflight. Development mode never initiates
+interactive login.
 It preserves this explicitly external login volume during cleanup. The Azure
 CLI cache is sensitive and shared read/write only with the test containers
 that need token refresh; use a trusted local Docker environment.
+
+That bootstrap digest was inspected as Azure CLI 2.91.0. The development
+image independently installs CLI 2.91.0, avoiding assumptions about the mutable
+`azurelinux3.0` tag or cross-version CLI cache compatibility.
 
 ### Ignored runtime inputs
 
@@ -110,6 +153,9 @@ There are no secret values in this file:
   },
   "password_secret": {
     "name": "<password-secret-name>"
+  },
+  "identity": {
+    "method": "managed_identity"
   }
 }
 ```
@@ -120,6 +166,10 @@ optional `"version": "<exact-32-hex-version>"`; omitted versions mean latest
 at startup. The broker bootstrap and receiver use the same references.
 Do not run while another actor changes the selected latest versions: an
 immutable version pin is the reproducible alternative.
+Use the VM identity block confirmed by its owner, including an existing
+user-assigned client ID only when selected. Optional approved local development
+instead requires `"identity":{"method":"development"}` and the separate
+`compose.development.yaml` login-volume override selected by the driver.
 
 For authorization coverage only, an owner can optionally supply
 `"authorization_vault_url": "https://<known-denied-vault>.vault.azure.net"`.
@@ -138,22 +188,32 @@ and obtain a material test-strategy decision instead.
 
 ### Future execution command
 
-Only after the handoff, integration commit, user login, and resource access:
+Only on the approved VM, after its access/identity handoff, integration commit,
+and explicit execution release:
 
 ```powershell
-Set-Location rust\otap-dataflow\examples\kafka\azure-key-vault-sasl
+Set-Location (Join-Path 'rust' 'otap-dataflow' 'examples' 'kafka' 'azure-key-vault-sasl')
 $source = (git rev-parse HEAD).Trim()
-$production = '<exact-final-production-commit-from-parent>'
-pwsh -NoProfile -File .\scripts\Test-AzureKeyVaultSasl.ps1 `
+$production = 'b455560661d4610e6d10237000e3c0f6628663f1'
+git fetch --no-tags https://github.com/sochen0714/otel-arrow.git $production
+pwsh -NoProfile -File (Join-Path 'scripts' 'Test-AzureKeyVaultSasl.ps1') `
   -SourceCommit $source -ProductionCommit $production `
-  -RuntimeInput .\.local\runtime.json -ExecutionApproved
+  -RuntimeInput (Join-Path '.local' 'runtime.json') `
+  -IdentityMode managed_identity -ManagedIdentityVmApproved -ExecutionApproved
 ```
 
 `-ExecutionApproved` explicitly acknowledges the execution gates; it is not
 permission to change Azure. The driver requires clean tracked source and the
 exact `HEAD`, verifies that the supplied production commit is an ancestor,
+or is identified by a `Production-Source-Commit` integration-commit trailer,
 checks the SDK revision, and records source/image/executable provenance.
 There is no execution permission implied by the existence of this script.
+The fetch retains the exact production object for provenance without merging
+its history into the validation source.
+The managed-identity driver refuses to run on the local Windows host or without
+the explicit approved-VM flag, without probing IMDS. If local development is
+later explicitly approved, use `-IdentityMode development` without the VM flag;
+do not copy its login volume to the VM.
 
 `-SkipBuild -Image <previously-built-development-image>` reuses only an image
 with matching source, production revision, and feature labels. This is a
@@ -234,13 +294,16 @@ retained as evidence. Failed/partial runs have `TestsSucceeded: false`.
 `finally` removes only this project's containers/network/volumes, deletes the
 two known generated runtime files, and restores the driver's environment.
 It verifies that no project-labeled containers/networks/volumes remain and
-that the external login volume still exists before marking cleanup successful.
-The external login volume, `.local/runtime.json`, reusable images, and normal
-build cache remain. Never use global reset/prune or stop shared services.
+that the optional development login volume, when selected, still exists before
+marking cleanup successful. Managed mode neither mounts nor inspects that
+external volume. `.local/runtime.json`, reusable images, normal build cache,
+and any separate development login volume remain. Never use global reset/prune
+or stop shared services.
 If cleanup fails or the host is interrupted, treat the run as failed and remove
 only the exact project reported in its `summary.json`; its private Docker
 volumes and container logs may still contain credentials.
 
-This is development-only validation, with no upstream PR or user-facing
-changelog entry. Live tests, Rust builds, and full workspace checks are
-deliberately deferred, not inferred green from structural checks.
+This is development-only validation with no upstream PR. The imported feature
+retains its production changelog entry; the harness itself needs no release
+note. Live tests and full workspace checks remain deferred, not inferred green
+from bounded source checks or image builds.

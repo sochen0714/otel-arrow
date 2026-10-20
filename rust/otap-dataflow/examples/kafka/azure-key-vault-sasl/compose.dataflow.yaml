@@ -9,8 +9,9 @@ services:
       AZURE_CORE_COLLECT_TELEMETRY: "no"
       AZURE_CORE_ONLY_SHOW_ERRORS: "true"
       KAFKA_GROUP_ID: ${AKV_GROUP:?}
+      NO_PROXY: 169.254.169.254,127.0.0.1,localhost,kafka
+      no_proxy: 169.254.169.254,127.0.0.1,localhost,kafka
     volumes:
-      - login:/root/.azure
       - ${AKV_RUN_DIR:?}/runtime:/runtime:ro
       - certificates:/certs:ro
     mem_limit: 512m

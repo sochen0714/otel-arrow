@@ -20,7 +20,7 @@ def validate_config(config):
         raise SafeFailure("Runtime input must be an object.")
     allowed = {
         "vault_url", "username_secret", "password_secret",
-        "authorization_vault_url",
+        "authorization_vault_url", "identity",
     }
     if set(config) - allowed:
         raise SafeFailure("Runtime input contains unsupported fields.")
@@ -52,6 +52,20 @@ def validate_config(config):
             or not re.fullmatch(r"[0-9a-fA-F]{32}", ref["version"])
         ):
             raise SafeFailure("A secret version must have exactly 32 hexadecimal digits.")
+    identity = config.get("identity")
+    if not isinstance(identity, dict) or set(identity) - {"method", "client_id"}:
+        raise SafeFailure("Explicit identity method and optional managed client ID are required.")
+    method = identity.get("method")
+    if method not in ("managed_identity", "development"):
+        raise SafeFailure("Use an explicitly approved managed_identity or development method.")
+    if "client_id" in identity and (
+        method != "managed_identity"
+        or not isinstance(identity["client_id"], str)
+        or not identity["client_id"]
+        or identity["client_id"].strip() != identity["client_id"]
+        or any(ord(char) < 32 for char in identity["client_id"])
+    ):
+        raise SafeFailure("Only managed identity accepts a nonempty existing client ID.")
     return config
 
 
@@ -77,6 +91,7 @@ def render_config(template, config, case, nonce):
         "__VAULT_URL_JSON__": vault,
         "__USERNAME_SECRET_JSON__": username,
         "__PASSWORD_SECRET_JSON__": password,
+        "__IDENTITY_JSON__": config["identity"],
         "__STARTUP_TIMEOUT_JSON__": timeout,
     }
     for token, value in replacements.items():
@@ -86,17 +101,33 @@ def render_config(template, config, case, nonce):
     return template
 
 
-def run_az(arguments):
+def run_az(arguments, output="json"):
     try:
         result = subprocess.run(
-            ["az", *arguments, "--only-show-errors", "--output", "json"],
+            ["az", *arguments, "--only-show-errors", "--output", output],
             capture_output=True, text=True, timeout=30, check=False,
         )
     except subprocess.TimeoutExpired:
         raise SafeFailure("Container Azure CLI operation timed out.") from None
     if result.returncode:
         raise SafeFailure("Container Azure CLI operation failed; check login, access, and network.")
-    return json.loads(result.stdout)
+    return json.loads(result.stdout) if output == "json" else None
+
+
+def prepare_identity(config, mode, managed_approved):
+    identity = config["identity"]
+    if identity["method"] != mode:
+        raise SafeFailure("Runtime identity does not match the explicitly selected harness mode.")
+    if mode == "managed_identity":
+        if managed_approved != "true":
+            raise SafeFailure("Managed identity requires explicit approved-VM execution handoff.")
+        arguments = ["login", "--identity", "--allow-no-subscriptions"]
+        if "client_id" in identity:
+            arguments.extend(("--client-id", identity["client_id"]))
+        # Private CLI bootstrap only; the receiver independently uses the real SDK MI credential.
+        run_az(arguments, output="none")
+    else:
+        run_az(["account", "show"])
 
 
 def read_secret(config, field):
@@ -193,8 +224,11 @@ def main():
         return
     config = validate_config(json.loads(Path("/input/runtime.json").read_text(encoding="utf-8")))
     if operation == "bootstrap":
-        # This runs only after explicit execution approval and user container login.
-        run_az(["account", "show"])
+        # No discovery/probing here: approval identifies the actual VM before this is allowed.
+        prepare_identity(
+            config, os.environ.get("AKV_IDENTITY_MODE"),
+            os.environ.get("AKV_MANAGED_IDENTITY_APPROVED"),
+        )
         values = {
             "username": read_secret(config, "username_secret"),
             "password": read_secret(config, "password_secret"),

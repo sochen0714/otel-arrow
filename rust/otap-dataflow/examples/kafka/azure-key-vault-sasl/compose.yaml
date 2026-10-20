@@ -1,5 +1,5 @@
 # Inherit the validated real SASL_SSL broker and certificate tooling.
-# All resources except the explicitly external development login are run-scoped.
+# Managed-identity mode uses no external login volume or forwarded user cache.
 services:
   certgen:
     extends:
@@ -21,8 +21,11 @@ services:
       AZURE_CONFIG_DIR: /root/.azure
       AZURE_CORE_COLLECT_TELEMETRY: "no"
       AZURE_CORE_ONLY_SHOW_ERRORS: "true"
+      AKV_IDENTITY_MODE: ${AKV_IDENTITY_MODE:?Explicit identity mode is required}
+      AKV_MANAGED_IDENTITY_APPROVED: ${AKV_MANAGED_IDENTITY_APPROVED:-false}
+      NO_PROXY: 169.254.169.254,127.0.0.1,localhost,kafka
+      no_proxy: 169.254.169.254,127.0.0.1,localhost,kafka
     volumes:
-      - login:/root/.azure
       - ${AKV_INPUT_FILE:?}:/input/runtime.json:ro
       - ${AKV_RUN_DIR:?}/runtime:/runtime
       - certificates:/certs
@@ -63,6 +66,3 @@ volumes:
   kafka-data:
   broker-auth:
   credential-reference:
-  login:
-    external: true
-    name: ${AKV_LOGIN_VOLUME:?Dedicated Azure CLI login volume is required}

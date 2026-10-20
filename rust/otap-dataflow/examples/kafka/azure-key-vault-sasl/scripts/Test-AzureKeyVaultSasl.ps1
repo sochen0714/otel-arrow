@@ -5,6 +5,8 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string] $ProductionCommit,
     [Parameter(Mandatory)][string] $RuntimeInput,
     [switch] $ExecutionApproved,
+    [ValidateSet('managed_identity', 'development')][string] $IdentityMode = 'managed_identity',
+    [switch] $ManagedIdentityVmApproved,
     [switch] $SkipBuild,
     [string] $Image,
     [ValidatePattern('^otap-akv-e2e-login(-[a-z0-9-]+)?$')]
@@ -15,34 +17,48 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $ExecutionApproved) {
-    throw 'Execution is gated: wait for final parent source handoff and user container sign-in.'
+    throw 'Execution is gated: wait for final source and an approved runtime/identity handoff.'
+}
+if ($IdentityMode -eq 'managed_identity' -and (-not $ManagedIdentityVmApproved -or -not $IsLinux)) {
+    throw 'Managed identity may run only on the explicitly approved Linux Azure VM, after parent access/identity handoff.'
+}
+if ($IdentityMode -eq 'development' -and $ManagedIdentityVmApproved) {
+    throw 'The approved-VM switch applies only to managed identity mode.'
 }
 $example = Split-Path -Parent $PSScriptRoot
-$repo = (Resolve-Path (Join-Path $example '..\..\..\..\..')).Path
+$repo = (Resolve-Path (Join-Path $example '..' '..' '..' '..' '..')).Path
 $source = (& git -C $repo rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $source -ne $SourceCommit) {
     throw 'SourceCommit must be the exact integrated validation checkout HEAD.'
 }
 & git -C $repo merge-base --is-ancestor $ProductionCommit HEAD
-if ($LASTEXITCODE -ne 0) { throw 'The handed-off final production commit is not an ancestor of HEAD.' }
+if ($LASTEXITCODE -ne 0) {
+    & git -C $repo cat-file -e "$ProductionCommit^{commit}"
+    if ($LASTEXITCODE -ne 0) { throw 'The handed-off final production commit is not available locally.' }
+    $integratedRevisions = & git -C $repo log '--format=%(trailers:key=Production-Source-Commit,valueonly)' HEAD
+    if ($LASTEXITCODE -ne 0 -or $ProductionCommit -notin @($integratedRevisions | ForEach-Object { $_.Trim() })) {
+        throw 'Production source is neither an ancestor nor recorded by an explicit net-integration commit.'
+    }
+}
 $dirty = & git -C $repo status --porcelain --untracked-files=normal
 if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Commit the validation checkout before building or executing.' }
-$lock = Get-Content -Raw (Join-Path $repo 'rust\otap-dataflow\Cargo.lock')
+$lock = Get-Content -Raw (Join-Path $repo 'rust' 'otap-dataflow' 'Cargo.lock')
 if (-not $lock.Contains('e1f93542648359690c640935f271f49a66dccc25')) {
     throw 'Expected official Azure SDK revision is absent; ask the parent for the final source.'
 }
-$manifest = Get-Content -Raw (Join-Path $repo 'rust\otap-dataflow\Cargo.toml')
+$manifest = Get-Content -Raw (Join-Path $repo 'rust' 'otap-dataflow' 'Cargo.toml')
 if (-not $manifest.Contains('azure-key-vault-sasl-auth')) { throw 'The AKV feature is not integrated.' }
 $inputPath = (Resolve-Path -LiteralPath $RuntimeInput).Path
 $localRoot = Join-Path $example '.local'
-if (-not $inputPath.StartsWith("$localRoot$([IO.Path]::DirectorySeparatorChar)", [StringComparison]::OrdinalIgnoreCase)) {
+$pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+if (-not $inputPath.StartsWith("$localRoot$([IO.Path]::DirectorySeparatorChar)", $pathComparison)) {
     throw 'Runtime input must be under this example''s ignored .local directory.'
 }
 & git -C $repo check-ignore --quiet -- $inputPath
 if ($LASTEXITCODE -ne 0) { throw 'Runtime input is not ignored by Git.' }
 
 $runId = "akv-sasl-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
-$run = Join-Path $example ".runs\$runId"
+$run = Join-Path $example '.runs' $runId
 $runtime = Join-Path $run 'runtime'
 $null = New-Item -ItemType Directory -Path $runtime -Force
 $utf8 = [Text.UTF8Encoding]::new($false)
@@ -51,7 +67,10 @@ $results = [Collections.Generic.List[object]]::new()
 $expectedBodies = @(1..3 | ForEach-Object { "$runId-record-$_" })
 $engineImage = "otap-akv-e2e-engine:$($source.Substring(0, 12))"
 if (-not $Image) { $Image = "otap-akv-e2e-development:$($source.Substring(0, 12))" }
-$environmentNames = @('AKV_IMAGE', 'AKV_INPUT_FILE', 'AKV_RUN_DIR', 'AKV_GROUP', 'AKV_LOGIN_VOLUME')
+$environmentNames = @(
+    'AKV_IMAGE', 'AKV_INPUT_FILE', 'AKV_RUN_DIR', 'AKV_GROUP',
+    'AKV_LOGIN_VOLUME', 'AKV_IDENTITY_MODE', 'AKV_MANAGED_IDENTITY_APPROVED'
+)
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -60,12 +79,17 @@ $env:AKV_IMAGE = $Image
 $env:AKV_INPUT_FILE = $inputPath
 $env:AKV_RUN_DIR = $run
 $env:AKV_GROUP = $runId
-$env:AKV_LOGIN_VOLUME = $LoginVolume
+$env:AKV_IDENTITY_MODE = $IdentityMode
+$env:AKV_MANAGED_IDENTITY_APPROVED = if ($ManagedIdentityVmApproved) { 'true' } else { 'false' }
+$env:AKV_LOGIN_VOLUME = if ($IdentityMode -eq 'development') { $LoginVolume } else { $null }
 $compose = @(
     'compose', '--project-name', $runId,
     '-f', (Join-Path $example 'compose.yaml'),
     '-f', (Join-Path $example 'compose.dataflow.yaml')
 )
+if ($IdentityMode -eq 'development') {
+    $compose += @('-f', (Join-Path $example 'compose.development.yaml'))
+}
 $script:lastSnapshot = $null
 $script:caseName = 'setup'
 $cleanupSucceeded = $false
@@ -253,7 +277,9 @@ function Test-Rejection {
 try {
     $server = Invoke-Docker -Arguments @('info', '--format', '{{.OSType}}') -Action 'linux-engine'
     if ($server.Stdout.Trim() -ne 'linux') { throw 'Docker Desktop must be running Linux containers.' }
-    $null = Invoke-Docker -Arguments @('volume', 'inspect', $LoginVolume) -Action 'dedicated-login-volume'
+    if ($IdentityMode -eq 'development') {
+        $null = Invoke-Docker -Arguments @('volume', 'inspect', $LoginVolume) -Action 'dedicated-login-volume'
+    }
     # Resolve without saving the result, and reject a host-injected inherited JAAS override.
     $resolved = (Invoke-Compose -Arguments @('config', '--format', 'json') -Action 'compose-structure').Stdout |
         ConvertFrom-Json
@@ -268,8 +294,8 @@ try {
             '--build-arg', 'TARGETPLATFORM=linux/amd64', '--build-arg', 'FEATURES=kafka,azure-key-vault-sasl-auth',
             '--build-arg', 'RUSTFLAGS=-C target-cpu=x86-64', '--build-arg', 'CARGO_BUILD_JOBS=2',
             '--label', "org.opencontainers.image.revision=$source",
-            '-f', (Join-Path $example '..\Dockerfile.dataflow'),
-            '-t', $engineImage, (Join-Path $repo 'rust\otap-dataflow')
+            '-f', (Join-Path $example '..' 'Dockerfile.dataflow'),
+            '-t', $engineImage, (Join-Path $repo 'rust' 'otap-dataflow')
         ) -TimeoutSeconds 3600 -Action 'build-actual-engine'
         $null = Invoke-Docker -Arguments @(
             'build', '--platform', 'linux/amd64', '--build-arg', "ENGINE_IMAGE=$engineImage",
@@ -306,7 +332,7 @@ try {
         HarnessBaseline = 'c5cc48b3888785c84ded65ac2c272c5b3f7a781d'
         ImageId = $imageInfo[0].Id; Image = $Image; ExecutableSha256 = $binaryHash
         Features = 'kafka,azure-key-vault-sasl-auth'; AzureCliVersion = $cliVersion
-        Identity = 'development'; Mechanism = 'PLAIN'; Transport = 'SASL_SSL'
+        Identity = $IdentityMode; Mechanism = 'PLAIN'; Transport = 'SASL_SSL'
         Encoding = 'plaintext'; Project = $runId; StartedUtc = [DateTime]::UtcNow.ToString('o')
     }
     Write-Artifact 'expected-bodies.json' $expectedBodies
@@ -393,8 +419,10 @@ default.api.timeout.ms=20000
                 ) -Action "verify-$kind-cleanup" -TimeoutSeconds 15
                 if ($remaining.Stdout.Trim()) { throw "Run-scoped $kind resources remain; cleanup is incomplete." }
             }
-            $null = Invoke-Docker -Arguments @('volume', 'inspect', $LoginVolume) `
-                -Action 'verify-login-preserved' -TimeoutSeconds 15
+            if ($IdentityMode -eq 'development') {
+                $null = Invoke-Docker -Arguments @('volume', 'inspect', $LoginVolume) `
+                    -Action 'verify-login-preserved' -TimeoutSeconds 15
+            }
             $cleanupSucceeded = $true
         } finally {
             # External login volume is intentionally preserved; never save raw broker/receiver logs.

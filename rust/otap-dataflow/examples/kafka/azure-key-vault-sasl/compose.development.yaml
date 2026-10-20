@@ -1,0 +1,13 @@
+# Optional local-development mode only, after that exact sign-in flow is approved.
+services:
+  bootstrap:
+    volumes:
+      - login:/root/.azure
+  receiver:
+    volumes:
+      - login:/root/.azure
+
+volumes:
+  login:
+    external: true
+    name: ${AKV_LOGIN_VOLUME:?Dedicated approved development login volume is required}

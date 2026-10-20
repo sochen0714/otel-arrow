@@ -15,6 +15,7 @@ CONFIG = {
     "vault_url": "https://example-e2e.vault.azure.net/",
     "username_secret": {"name": "example-username"},
     "password_secret": {"name": "example-password", "version": "1a" * 16},
+    "identity": {"method": "managed_identity"},
 }
 VALUES = {"username": "fixture_login_794", "password": 'fixture-password-"\\-794'}
 EXPECTED = ["fixture-record-1", "fixture-record-2", "fixture-record-3"]
@@ -25,7 +26,7 @@ def rendered_fields(case, config=None):
     fields = {}
     for line in rendered.splitlines():
         key, _, value = line.strip().partition(": ")
-        if key in ("vault_url", "username_secret", "password_secret", "startup_timeout"):
+        if key in ("vault_url", "username_secret", "password_secret", "startup_timeout", "identity"):
             fields[key] = json.loads(value)
     return fields
 
@@ -38,6 +39,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(fields["username_secret"], CONFIG["username_secret"])
         self.assertEqual(fields["password_secret"], CONFIG["password_secret"])
         self.assertEqual(fields["startup_timeout"], "15s")
+        self.assertEqual(fields["identity"], {"method": "managed_identity"})
 
     # Scenario: Public runtime input has absent, malformed, or unsupported identity/resource fields.
     # Guarantees: Invalid input cannot inject alternate credentials, fallback, or arbitrary CLI targets.
@@ -85,6 +87,74 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(run_az.call_args.args[0][4], (
                 "https://example-e2e.vault.azure.net/secrets/example-password/" + "1a" * 16
             ))
+
+    # Scenario: A runtime input explicitly selects an existing system- or user-assigned managed identity.
+    # Guarantees: Rendering preserves the selection, never guesses a client ID, and never substitutes CLI auth.
+    def test_managed_identity_selection_is_preserved(self):
+        client_id = "00000000-0000-0000-0000-000000000001"
+        config = deepcopy(CONFIG)
+        config["identity"]["client_id"] = client_id
+        self.assertEqual(rendered_fields("configured", config)["identity"], {
+            "method": "managed_identity", "client_id": client_id,
+        })
+        self.assertNotIn("client_id", rendered_fields("configured")["identity"])
+
+    # Scenario: Identity input is absent, ambiguous, inapplicable, or contains an unsupported flow.
+    # Guarantees: The harness requires explicit approved identity selection without silent system defaults.
+    def test_invalid_identity_is_rejected(self):
+        config = deepcopy(CONFIG)
+        del config["identity"]
+        with self.assertRaises(runtime.SafeFailure):
+            runtime.validate_config(config)
+        for identity in (
+            {}, {"method": "workload_identity"},
+            {"method": "development", "client_id": "not-applicable"},
+            {"method": "managed_identity", "client_id": ""},
+            {"method": "managed_identity", "client_id": " padded "},
+            {"method": "managed_identity", "tenant_id": "not-applicable"},
+        ):
+            config = {**deepcopy(CONFIG), "identity": identity}
+            with self.assertRaises(runtime.SafeFailure):
+                runtime.validate_config(config)
+
+    # Scenario: Managed-identity bootstrap is requested before VM approval or with a mismatched mode.
+    # Guarantees: No Azure CLI operation or implicit IMDS probe occurs.
+    def test_managed_bootstrap_requires_explicit_approval(self):
+        for mode, approved in (("managed_identity", "false"), ("development", "true"), (None, None)):
+            with patch.object(runtime, "run_az") as run_az:
+                with self.assertRaises(runtime.SafeFailure):
+                    runtime.prepare_identity(CONFIG, mode, approved)
+                run_az.assert_not_called()
+
+    # Scenario: A parent-authorized system-assigned VM is the explicit runtime target.
+    # Guarantees: Private bootstrap uses CLI identity login with no credential output or user-token forwarding.
+    def test_system_managed_bootstrap_has_no_credential_output(self):
+        with patch.object(runtime, "run_az") as run_az:
+            runtime.prepare_identity(CONFIG, "managed_identity", "true")
+        run_az.assert_called_once_with(
+            ["login", "--identity", "--allow-no-subscriptions"], output="none",
+        )
+
+    # Scenario: The selected VM has a known existing user-assigned managed identity.
+    # Guarantees: The exact client ID is passed only to private VM-local bootstrap and the SDK config.
+    def test_user_assigned_bootstrap_selects_exact_client(self):
+        config = deepcopy(CONFIG)
+        config["identity"]["client_id"] = "00000000-0000-0000-0000-000000000001"
+        with patch.object(runtime, "run_az") as run_az:
+            runtime.prepare_identity(config, "managed_identity", "true")
+        run_az.assert_called_once_with(
+            ["login", "--identity", "--allow-no-subscriptions", "--client-id",
+             config["identity"]["client_id"]], output="none",
+        )
+
+    # Scenario: Development mode is separately approved and explicitly selected without a managed client ID.
+    # Guarantees: Bootstrap verifies the existing CLI session but never initiates interactive login.
+    def test_development_bootstrap_never_initiates_login(self):
+        config = {**deepcopy(CONFIG), "identity": {"method": "development"}}
+        self.assertEqual(rendered_fields("configured", config)["identity"], config["identity"])
+        with patch.object(runtime, "run_az") as run_az:
+            runtime.prepare_identity(config, "development", "false")
+        run_az.assert_called_once_with(["account", "show"])
 
     # Scenario: One selected secret does not exist while the other remains the configured valid reference.
     # Guarantees: Missing-password coverage retains the real username read and cannot become a file fallback.
