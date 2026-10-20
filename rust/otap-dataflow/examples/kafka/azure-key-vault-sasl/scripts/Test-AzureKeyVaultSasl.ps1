@@ -282,11 +282,11 @@ try {
     }
     # Resolve without saving the result, and reject a host-injected inherited JAAS override.
     $resolved = (Invoke-Compose -Arguments @('config', '--format', 'json') -Action 'compose-structure').Stdout |
-        ConvertFrom-Json
-    $jaas = $resolved.services.kafka.environment.PSObject.Properties[
+        ConvertFrom-Json -AsHashtable
+    $jaas = $resolved.services.kafka.environment[
         'KAFKA_LISTENER_NAME_SASL__SSL_PLAIN_SASL_JAAS_CONFIG'
     ]
-    if ($null -ne $jaas -and $null -ne $jaas.Value) { throw 'Unexpected inline broker JAAS override.' }
+    if ($null -ne $jaas) { throw 'Unexpected inline broker JAAS override.' }
     if (-not $SkipBuild) {
         $null = Invoke-Docker -Arguments @(
             'buildx', 'build', '--load', '--platform', 'linux/amd64',
