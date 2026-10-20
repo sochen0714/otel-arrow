@@ -23,6 +23,9 @@ is integrated onto validation baseline
 `cf090f47d9145c44ffe1199fa168eb534fc7d750` plus the harness).
 The integrated validation revision is recorded by Git and future build
 provenance, not mislabeled as the production tree.
+The net source/runtime integration commit is
+`82083de42e92eb63a62518edfb6bfba80cb9c82d`; build provenance records the exact
+final checkout SHA, including any subsequent documentation/provenance commit.
 
 Integration retained all 1,150 existing package name/version pairs and all
 55 newer-main component IDs, deduplicating the old OAuth2 inventory entry and
