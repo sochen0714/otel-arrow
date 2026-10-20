@@ -4,3 +4,5 @@ target/release/*
 !target/release/df_engine.exe
 docs
 configs
+examples/kafka/azure-key-vault-sasl/.local
+examples/kafka/azure-key-vault-sasl/.runs

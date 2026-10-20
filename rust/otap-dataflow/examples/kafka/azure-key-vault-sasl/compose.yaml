@@ -1,0 +1,68 @@
+# Inherit the validated real SASL_SSL broker and certificate tooling.
+# All resources except the explicitly external development login are run-scoped.
+services:
+  certgen:
+    extends:
+      file: ../sasl-tls/compose.yaml
+      service: certgen
+    volumes:
+      - certificates:/certs
+    mem_limit: 512m
+    cpus: 1
+
+  bootstrap:
+    image: ${AKV_IMAGE:?Run scripts/Test-AzureKeyVaultSasl.ps1}
+    entrypoint: [python3, /validation/akv_runtime.py]
+    command: [bootstrap]
+    depends_on:
+      certgen:
+        condition: service_completed_successfully
+    environment:
+      AZURE_CONFIG_DIR: /root/.azure
+      AZURE_CORE_COLLECT_TELEMETRY: "no"
+      AZURE_CORE_ONLY_SHOW_ERRORS: "true"
+    volumes:
+      - login:/root/.azure
+      - ${AKV_INPUT_FILE:?}:/input/runtime.json:ro
+      - ${AKV_RUN_DIR:?}/runtime:/runtime
+      - certificates:/certs
+      - broker-auth:/broker-auth
+      - credential-reference:/private
+    mem_limit: 512m
+    cpus: 1
+    logging:
+      driver: none
+
+  kafka:
+    extends:
+      file: ../sasl-tls/compose.yaml
+      service: kafka
+    user: "1000:1000"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - certificates:/etc/kafka/secrets:ro
+      - broker-auth:/etc/kafka/auth:ro
+      - kafka-data:/var/lib/kafka/data
+    environment:
+      # Remove the inherited inline PLAIN JAAS override; use the private file.
+      KAFKA_LISTENER_NAME_SASL__SSL_PLAIN_SASL_JAAS_CONFIG: null
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/auth/server.conf
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    mem_limit: 1536m
+    cpus: 1
+    logging:
+      options:
+        max-size: 10m
+        max-file: "2"
+
+volumes:
+  certificates:
+  kafka-data:
+  broker-auth:
+  credential-reference:
+  login:
+    external: true
+    name: ${AKV_LOGIN_VOLUME:?Dedicated Azure CLI login volume is required}

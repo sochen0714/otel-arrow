@@ -37,3 +37,5 @@ dist/
 build/
 out/
 coverage/
+rust/otap-dataflow/examples/kafka/azure-key-vault-sasl/.local/
+rust/otap-dataflow/examples/kafka/azure-key-vault-sasl/.runs/

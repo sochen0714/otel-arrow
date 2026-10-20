@@ -1,0 +1,22 @@
+# Development/test only. Never use this Azure CLI/root image in production.
+ARG ENGINE_IMAGE
+FROM ${ENGINE_IMAGE} AS engine
+FROM debian:trixie-slim
+
+ARG AZURE_CLI_VERSION=2.77.0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libstdc++6 python3 python3-venv \
+    && python3 -m venv /opt/azure-cli \
+    && /opt/azure-cli/bin/pip install --no-cache-dir "azure-cli==${AZURE_CLI_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/opt/azure-cli/bin:${PATH}" \
+    AZURE_CONFIG_DIR=/root/.azure \
+    AZURE_CORE_COLLECT_TELEMETRY=no \
+    AZURE_CORE_ONLY_SHOW_ERRORS=true \
+    PYTHONDONTWRITEBYTECODE=1
+
+COPY --from=engine /home/nonroot/df_engine /home/nonroot/df_engine
+COPY scripts/akv_runtime.py /validation/akv_runtime.py
+COPY receiver.yaml /validation/receiver.template.yaml
+ENTRYPOINT ["/home/nonroot/df_engine"]
