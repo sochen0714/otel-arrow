@@ -2,7 +2,7 @@
 
 **Integrated, not live-validated.** The parent handed off the final production
 source and released its heavy-build hold. Source/image builds may proceed;
-live AKV cases are prerequisite-blocked pending an approved identity route.
+live AKV cases await final artifacts and the approved operator handoff.
 This branch contains the net feature integration for validation, not
 production receiver implementation changes.
 See [VALIDATION.md](VALIDATION.md) for the current evidence boundary.
@@ -80,13 +80,16 @@ The attempted local sign-in was blocked by an identity access policy, not a
 Key Vault SDK/data-plane failure. Do not retry alternate login flows, export
 token caches, or weaken policy. An identity-admin-approved runtime/identity
 route is required before any token/secret preflight or live test. The user
-selected an existing Azure VM with managed identity; target/access and its
-existing identity selection must be handed off privately before execution.
+selected an existing Azure VM's system-assigned identity, and the parent
+reported a successful operator-run, login-only CLI identity preflight.
+That proves neither Key Vault permissions nor SDK/receiver acceptance.
+Target/access and execution release remain private handoff requirements.
 
 ### Approved VM managed identity
 
-The VM recipe requires an approved Linux/amd64 VM with Docker and PowerShell
-7. Do not connect, install tools remotely, or probe IMDS until its target,
+The VM recipe requires an approved Linux/amd64 VM with Docker. PowerShell
+7 can run in the test-driver container below. Do not connect, install tools
+remotely, or probe IMDS until its target,
 access channel, and execution scope are explicitly released by the parent.
 Keep VM, subscription, identity, account, and vault identifiers in ignored
 runtime inputs/private handoff, never committed documentation or evidence.
@@ -106,6 +109,59 @@ uses the real SDK `ManagedIdentityCredential`, not CLI tokens, a forwarded
 user cache, or an identity proxy. Both use the same explicit client-ID selection.
 IMDS is excluded from proxy routing; actual container reachability must be
 approved. Do not modify VM identity, firewall, routing, or IAM to make it work.
+
+### Containerized driver with approved sudo Docker
+
+The user selected disposable containerized tools instead of host PowerShell or
+Azure CLI installs, Docker-group changes, or Azure changes. Docker approval
+alone does **not** release managed-identity or Key Vault execution: wait for
+the parent's explicit existing-identity selection and runtime release.
+
+`Dockerfile.runner` contains PowerShell, Git, Docker CLI, Compose and buildx.
+It contains no Azure credentials; Azure CLI remains in the separate test image.
+Build all three images from the final committed checkout. The runner build,
+after the engine/test image builds, is:
+
+```powershell
+$source = (git rev-parse HEAD).Trim()
+$runner = "otap-akv-e2e-runner:$($source.Substring(0,12))"
+docker buildx build --load --platform linux/amd64 `
+  --label "org.opencontainers.image.revision=$source" `
+  -f (Join-Path 'rust' 'otap-dataflow' 'examples' 'kafka' 'azure-key-vault-sasl' 'Dockerfile.runner') `
+  -t $runner (Join-Path 'rust' 'otap-dataflow' 'examples' 'kafka' 'azure-key-vault-sasl')
+```
+
+Record the resolved base-image digests, runner image ID and tool versions.
+`DOCKER_CLI_IMAGE` and `POWERSHELL_IMAGE` build arguments accept immutable
+references. Transfer the final checkout and three images only through the
+approved channel. The VM needs a real Git checkout with the production commit
+object, not a copied Windows worktree `.git` pointer. Never transfer the local
+development login volume or any token cache.
+
+After release, from the example directory on the approved VM:
+
+```sh
+bash scripts/Run-Containerized.sh \
+  --execution-approved --managed-identity-vm-approved \
+  b455560661d4610e6d10237000e3c0f6628663f1 \
+  "$PWD/.local/runtime.json"
+```
+
+This uses `sudo -n docker` without installing anything on the host or changing
+groups. **Docker socket access is root-equivalent, not a sandbox**, even with
+resource limits. Use only the trusted driver image and explicitly approved VM.
+The checkout is mounted at its **same absolute host path**, read/write for
+ignored run artifacts; the host daemon resolves all nested bind paths.
+Git trust is restricted to that exact checkout by container-only environment
+configuration, never `safe.directory=*`. No home or Azure cache is mounted.
+The driver has no network; the separately scoped collector/bootstrap services
+use their actual SDK/CLI VM identity after approval.
+
+The wrapper uses prebuilt exact-source images (`-SkipBuild`), a 30-minute
+outer bound, one CPU and 768 MiB for the driver. It preserves failure exit
+codes and removes only its own driver container and unique project's labeled
+containers, networks and volumes, including after interruption. The external
+development-login volume is never part of this managed-identity run.
 
 ### Optional development mode: prerequisite-blocked
 
@@ -135,8 +191,11 @@ CLI cache is sensitive and shared read/write only with the test containers
 that need token refresh; use a trusted local Docker environment.
 
 That bootstrap digest was inspected as Azure CLI 2.91.0. The development
-image independently installs CLI 2.91.0, avoiding assumptions about the mutable
-`azurelinux3.0` tag or cross-version CLI cache compatibility.
+image copies its unmodified CLI and Python 3.12 runtime into newer Debian,
+retaining Debian's libc/OpenSSL and the unchanged engine executable. This
+avoids a failed PyPI TLS download without disabling TLS, and avoids assumptions
+about a mutable tag or cross-version CLI cache compatibility. CLI version and
+module-loading checks run with no network or cache mount.
 
 ### Ignored runtime inputs
 

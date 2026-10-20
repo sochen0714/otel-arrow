@@ -2,7 +2,9 @@
 
 **Status: production source integrated; live receiver E2E is pending.**
 
-No Azure login was initiated and no secrets/tokens were retrieved. Source
+This validation session initiated no Azure login and retrieved no
+secrets/tokens. The parent separately reported an operator-run system-assigned
+CLI login-only preflight; no Key Vault/SDK/receiver coverage is implied. Source
 checks and image-build preparation are permitted after the parent's handoff;
 they are not live acceptance. No user Azure resources or upstream pull
 requests were changed by this validation session.
@@ -56,6 +58,20 @@ was applied. This is a Windows checkout prerequisite failure, not evidence of
 an API regression or a successful integrated crate check. Linux image build
 verification remains separate.
 
+An actual locked Linux/amd64 release engine build subsequently passed from
+`90285e3092477fa1ad6ef64a4f20750e504d6784`, using one Cargo job and the exact
+official SDK revision. The cold attempt reached its one-hour bound; a bounded
+cached retry completed without source/profile changes. Initial image ID:
+`sha256:1885c620b76e556270bfed27ff4364f26addc4de53cccbf2cdd35fe2bfa3f88d`.
+This source/image remains distinct from subsequent harness-only revisions.
+
+The first CLI test-image build failed a verified-TLS PyPI handshake. No TLS
+verification was disabled. The replacement copies the unmodified pinned
+official CLI/Python runtime into Debian; a preflight build passed CLI version
+and module loading with no network. Final exact-source image IDs, executable
+hashes and driver-tool checks belong in the separate build provenance artifact,
+not a live-E2E claim or a relabeling of the initial engine.
+
 ## Lightweight local checks
 
 From the repository root, these checks require no Docker engine, Azure
@@ -95,6 +111,13 @@ encountered pre-existing CRLF checkout failures across unrelated tracked
 Markdown/YAML/Python files on Windows. Changed-file sanity is checked
 separately after LF normalization; unrelated files are not rewritten and a
 green repository-wide sanity result is not claimed.
+
+The containerized-driver addition also passed both Linux wrapper tests with
+no network: mandatory approval gates, and mocked-Docker failure cleanup that
+includes stopped project containers and preserves the original failure code.
+All 26 tests passed in the Linux test image. These are offline tests, not
+managed-identity, Key Vault, Kafka, or receiver acceptance. The Windows run
+passes 24 runtime tests and explicitly skips the two Linux-only wrapper tests.
 
 ## Live acceptance still required
 

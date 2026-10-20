@@ -4,6 +4,9 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -21,6 +24,79 @@ CONFIG = {
 }
 VALUES = {"username": "fixture_login_794", "password": 'fixture-password-"\\-794'}
 EXPECTED = ["fixture-record-1", "fixture-record-2", "fixture-record-3"]
+
+class ContainerizedDriverTests(unittest.TestCase):
+    # Scenario: The containerized driver is invoked without the two runtime/identity releases.
+    # Guarantees: It refuses before sudo, Docker, Git, input reads, or any identity operation.
+    @unittest.skipUnless(sys.platform == "linux" and shutil.which("bash"), "Linux Bash wrapper test")
+    def test_wrapper_requires_both_approvals(self):
+        result = subprocess.run(
+            ["bash", str(Path(__file__).with_name("Run-Containerized.sh"))],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Execution is gated", result.stderr)
+
+    # Scenario: A simulated driver failure leaves a stopped project container behind.
+    # Guarantees: Cleanup includes stopped containers, uses only its unique label, and preserves exit 42.
+    @unittest.skipUnless(sys.platform == "linux", "Linux wrapper cleanup test")
+    def test_wrapper_cleans_stopped_project_resources_after_failure(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "example" / "scripts"
+            scripts.mkdir(parents=True)
+            wrapper = scripts / "Run-Containerized.sh"
+            shutil.copyfile(Path(__file__).with_name("Run-Containerized.sh"), wrapper)
+            local = scripts.parent / ".local"
+            local.mkdir()
+            runtime_input = local / "runtime.json"
+            runtime_input.write_text("{}", encoding="ascii")
+            tools = root / "tools"
+            tools.mkdir()
+            (tools / "git").write_text(
+                '#!/bin/sh\ncase "$*" in\n'
+                '*--show-toplevel*) printf "%s\\n" "$FIXTURE_ROOT";;\n'
+                '*"rev-parse HEAD"*) printf "%s\\n" "$FIXTURE_SOURCE";;\n'
+                '*check-ignore*) exit 0;;\n*) exit 99;;\nesac\n', encoding="ascii",
+            )
+            (tools / "sudo").write_text('#!/bin/sh\nshift\nexec "$@"\n', encoding="ascii")
+            (tools / "docker").write_text(
+                '#!/usr/bin/env python3\n'
+                'import json, os, pathlib, sys\n'
+                'a=sys.argv[1:]; root=pathlib.Path(os.environ["FIXTURE_ROOT"])\n'
+                'with (root/"calls.jsonl").open("a") as f: f.write(json.dumps(a)+"\\n")\n'
+                'state=root/"stopped"\n'
+                'if a[:2]==["image","inspect"]:\n'
+                ' print(os.environ["FIXTURE_SOURCE"] if "revision" in a[3] else "sha256:fixture")\n'
+                'elif a[:2]==["container","inspect"]: sys.exit(1)\n'
+                'elif a[0]=="run": state.touch(); sys.exit(42)\n'
+                'elif a[:2]==["container","ls"] and state.exists() and "--all" in a:\n'
+                ' print("fixture-stopped-container")\n'
+                'elif a[:2]==["rm","-f"]:\n'
+                ' assert a[2]=="fixture-stopped-container"; state.unlink()\n'
+                'elif a[1]=="ls": pass\n'
+                'else: sys.exit(98)\n', encoding="ascii",
+            )
+            for tool in tools.iterdir():
+                tool.chmod(0o755)
+            environment = {
+                **os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                "FIXTURE_ROOT": str(root), "FIXTURE_SOURCE": "a" * 40,
+            }
+            result = subprocess.run(
+                ["bash", str(wrapper), "--execution-approved", "--managed-identity-vm-approved",
+                 "b" * 40, str(runtime_input)],
+                env=environment, capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 42, result.stderr)
+            self.assertFalse((root / "stopped").exists())
+            calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
+            self.assertEqual([call for call in calls if call[0] == "rm"],
+                             [["rm", "-f", "fixture-stopped-container"]])
+            lists = [call for call in calls if len(call) > 1 and call[1] == "ls"]
+            labels = {call[-1] for call in lists}
+            self.assertEqual(len(labels), 1)
+            self.assertRegex(next(iter(labels)), r"^label=com\.docker\.compose\.project=akv-sasl-[0-9a-f]{12}$")
 
 
 def rendered_fields(case, config=None):

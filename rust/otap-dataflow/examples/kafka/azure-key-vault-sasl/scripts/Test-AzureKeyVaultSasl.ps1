@@ -9,6 +9,7 @@ param(
     [switch] $ManagedIdentityVmApproved,
     [switch] $SkipBuild,
     [string] $Image,
+    [ValidatePattern('^akv-sasl-[0-9a-f]{12}$')][string] $ProjectName,
     [ValidatePattern('^otap-akv-e2e-login(-[a-z0-9-]+)?$')]
     [string] $LoginVolume = 'otap-akv-e2e-login',
     [ValidateRange(30, 180)][int] $CaseTimeoutSeconds = 90
@@ -57,7 +58,7 @@ if (-not $inputPath.StartsWith("$localRoot$([IO.Path]::DirectorySeparatorChar)",
 & git -C $repo check-ignore --quiet -- $inputPath
 if ($LASTEXITCODE -ne 0) { throw 'Runtime input is not ignored by Git.' }
 
-$runId = "akv-sasl-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
+$runId = if ($ProjectName) { $ProjectName } else { "akv-sasl-$([guid]::NewGuid().ToString('N').Substring(0, 12))" }
 $run = Join-Path $example '.runs' $runId
 $runtime = Join-Path $run 'runtime'
 $null = New-Item -ItemType Directory -Path $runtime -Force
@@ -298,7 +299,7 @@ try {
             '-t', $engineImage, (Join-Path $repo 'rust' 'otap-dataflow')
         ) -TimeoutSeconds 3600 -Action 'build-actual-engine'
         $null = Invoke-Docker -Arguments @(
-            'build', '--platform', 'linux/amd64', '--build-arg', "ENGINE_IMAGE=$engineImage",
+            'buildx', 'build', '--load', '--platform', 'linux/amd64', '--build-arg', "ENGINE_IMAGE=$engineImage",
             '--label', "org.opencontainers.image.revision=$source",
             '--label', "org.otel.akv.production-revision=$ProductionCommit",
             '--label', 'org.otel.akv.features=kafka,azure-key-vault-sasl-auth',
