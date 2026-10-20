@@ -84,7 +84,7 @@ PLAIN JAAS override. These are structural checks, not a live Kafka
 or Azure acceptance result. Unit tests of the renderer/scanner are not an SDK
 mock and cannot substitute for E2E.
 
-Preparation results: all 23 renderer/scanner/identity-selection tests,
+Preparation results: all 24 renderer/scanner/identity-selection tests,
 PowerShell parsing, and the fail-closed local managed-identity execution gate
 passed. Daemon-free Compose resolution passed for both modes: no published
 ports, no managed-mode login/cache mount, optional development external

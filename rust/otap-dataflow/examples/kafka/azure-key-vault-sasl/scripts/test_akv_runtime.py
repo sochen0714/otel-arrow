@@ -2,7 +2,9 @@
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 from urllib.parse import quote
@@ -155,6 +157,38 @@ class RuntimeTests(unittest.TestCase):
         with patch.object(runtime, "run_az") as run_az:
             runtime.prepare_identity(config, "development", "false")
         run_az.assert_called_once_with(["account", "show"])
+
+    # Scenario: The root helper writes a public coverage flag into a non-root VM driver's bind mount.
+    # Guarantees: The driver can read that boolean despite the helper's private-file umask.
+    def test_authorization_flag_is_readable_by_nonroot_driver(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {
+                "/input/runtime.json": root / "input.json",
+                "/private/reference.json": root / "reference.json",
+                "/runtime/authorization-enabled": root / "flag",
+            }
+            paths["/input/runtime.json"].write_text(json.dumps(CONFIG), encoding="utf-8")
+            original_mask = os.umask(0o022)
+            try:
+                with (
+                    patch.object(runtime, "Path", side_effect=lambda value: paths[value]),
+                    patch.object(runtime.sys, "argv", ["akv_runtime.py", "bootstrap"]),
+                    patch.dict(os.environ, {
+                        "AKV_IDENTITY_MODE": "managed_identity",
+                        "AKV_MANAGED_IDENTITY_APPROVED": "true",
+                    }),
+                    patch.object(runtime, "run_az"),
+                    patch.object(runtime, "read_secret", side_effect=list(VALUES.values())),
+                    patch.object(runtime, "configure_broker"),
+                    patch.object(runtime, "write_private"),
+                ):
+                    runtime.main()
+            finally:
+                os.umask(original_mask)
+            flag = paths["/runtime/authorization-enabled"]
+            self.assertEqual(flag.read_text(encoding="ascii"), "false")
+            self.assertEqual(flag.stat().st_mode & 0o444, 0o444)
 
     # Scenario: One selected secret does not exist while the other remains the configured valid reference.
     # Guarantees: Missing-password coverage retains the real username read and cannot become a file fallback.

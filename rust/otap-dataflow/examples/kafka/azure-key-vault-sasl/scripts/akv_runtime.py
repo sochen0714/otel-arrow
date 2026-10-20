@@ -235,9 +235,10 @@ def main():
         }
         configure_broker(values)
         write_private(Path("/private/reference.json"), json.dumps(values))
-        Path("/runtime/authorization-enabled").write_text(
-            str("authorization_vault_url" in config).lower(), encoding="ascii"
-        )
+        flag = Path("/runtime/authorization-enabled")
+        flag.write_text(str("authorization_vault_url" in config).lower(), encoding="ascii")
+        # Only a boolean; the non-root VM driver must be able to read this root-created file.
+        flag.chmod(0o644)
     elif operation == "render":
         template = Path("/validation/receiver.template.yaml").read_text(encoding="utf-8")
         rendered = render_config(template, config, sys.argv[2], sys.argv[3])
