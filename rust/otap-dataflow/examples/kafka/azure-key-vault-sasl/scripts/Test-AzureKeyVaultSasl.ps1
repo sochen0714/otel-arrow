@@ -177,23 +177,28 @@ function Invoke-Helper {
 
 function Get-Snapshot {
     param([string] $Container)
-    $raw = Invoke-Docker -Arguments @('logs', $Container) -Action 'read-private-receiver-output' -TimeoutSeconds 15
-    $request = ConvertTo-Json -InputObject @{
-        logs = $raw.Stdout + $raw.Stderr; expected = $expectedBodies
-    } -Compress
-    $scan = Invoke-Helper -Arguments @('scan') -InputText $request -TimeoutSeconds 15
-    $summary = ConvertFrom-Json -InputObject $scan.Stdout
-    $stateResult = Invoke-Docker -Arguments @('inspect', '--format', '{{json .State}}', $Container) `
-        -Action 'receiver-process-state' -TimeoutSeconds 10
-    $state = ConvertFrom-Json -InputObject $stateResult.Stdout
-    $script:lastSnapshot = @{
-        Output = $summary; Running = $state.Running
-        ExitCode = $state.ExitCode; OomKilled = $state.OOMKilled
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $raw = Invoke-Docker -Arguments @('logs', $Container) -Action 'read-private-receiver-output' -TimeoutSeconds 15
+        $request = ConvertTo-Json -InputObject @{
+            logs = $raw.Stdout + $raw.Stderr; expected = $expectedBodies
+        } -Compress
+        $scan = Invoke-Helper -Arguments @('scan') -InputText $request -TimeoutSeconds 15
+        $summary = ConvertFrom-Json -InputObject $scan.Stdout
+        $stateResult = Invoke-Docker -Arguments @('inspect', '--format', '{{json .State}}', $Container) `
+            -Action 'receiver-process-state' -TimeoutSeconds 10
+        $state = ConvertFrom-Json -InputObject $stateResult.Stdout
+        $script:lastSnapshot = @{
+            Output = $summary; Running = $state.Running
+            ExitCode = $state.ExitCode; OomKilled = $state.OOMKilled
+        }
+        Write-Artifact "$($script:caseName).json" $script:lastSnapshot
+        if ($summary.LeakDetected) { throw 'Credential disclosure detected; raw output was not saved.' }
+        if ($state.OOMKilled) { throw 'Receiver ran out of memory; this is not a credential failure.' }
+        if ($attempt -eq 1 -and $state.Running) { throw 'Receiver restarted after a terminal observation.' }
+        if ($state.Running -or $attempt -eq 1) { return [pscustomobject]$script:lastSnapshot }
+        # The receiver may exit while the helper scans earlier logs. Recapture
+        # once after observing its exit; never pair those earlier logs with it.
     }
-    Write-Artifact "$($script:caseName).json" $script:lastSnapshot
-    if ($summary.LeakDetected) { throw 'Credential disclosure detected; raw output was not saved.' }
-    if ($state.OOMKilled) { throw 'Receiver ran out of memory; this is not a credential failure.' }
-    [pscustomobject]$script:lastSnapshot
 }
 
 function Start-Case {
@@ -228,6 +233,7 @@ function Test-Delivery {
             if (-not $snapshot.Running) { throw 'Receiver exited unexpectedly after delivery.' }
             Stop-Receiver
             $final = Get-Snapshot $id
+            if ($final.Running) { throw 'Receiver did not stop after delivery.' }
             if (-not $final.Output.ExactBodies) { throw 'Final output is not the exact three expected bodies.' }
             $results.Add(@{ Case = 'configured'; Outcome = 'PASS'; Output = $final.Output })
             Write-Host 'PASS: configured - three exact decoded log bodies.'
@@ -237,6 +243,24 @@ function Test-Delivery {
         Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
     throw 'Configured AKV credentials did not deliver the exact expected telemetry before the deadline.'
+}
+
+# Scenario: A negative acquisition case reports its expected source failure and exact readiness gate.
+# Guarantees: Polling and final capture apply the same strict classifier, including only the scoped 1 ms race.
+function Test-StartupFailure {
+    param([object] $Snapshot, [string] $Name, [string] $Stage, [string] $Category)
+    $classified = @($Snapshot.Output.StartupFailures | Where-Object {
+        $_.Category -eq $Category -and (-not $Stage -or $_.Stage -eq $Stage)
+    }).Count -gt 0
+    $expectedTimeout = if ($Name -eq 'timeout') { '1ms' } else { '15s' }
+    $readinessFailed = @($Snapshot.Output.ReadinessFailures | Where-Object {
+        $_.Extension -eq 'credentials' -and $_.Variant -eq 'shared' -and
+        $_.Timeout -eq $expectedTimeout
+    }).Count -gt 0
+    # At 1 ms the engine's readiness timer can win the acquisition timer.
+    $readinessFailed -and (
+        $classified -or ($Name -eq 'timeout' -and $Category -eq 'timeout' -and -not $Stage)
+    )
 }
 
 # Scenario: Acquisition fails before a complete pair, or the local broker rejects that pair.
@@ -257,18 +281,7 @@ function Test-Rejection {
             }
             if (-not $snapshot.Running) { throw 'Receiver exited without an explicit SASL rejection.' }
         } else {
-            $classified = @($snapshot.Output.StartupFailures | Where-Object {
-                $_.Category -eq $Category -and (-not $Stage -or $_.Stage -eq $Stage)
-            }).Count -gt 0
-            $expectedTimeout = if ($Name -eq 'timeout') { '1ms' } else { '15s' }
-            $readinessFailed = @($snapshot.Output.ReadinessFailures | Where-Object {
-                $_.Extension -eq 'credentials' -and $_.Variant -eq 'shared' -and
-                $_.Timeout -eq $expectedTimeout
-            }).Count -gt 0
-            # At 1 ms the engine's readiness timer can win the acquisition timer.
-            $matched = $readinessFailed -and (
-                $classified -or ($Name -eq 'timeout' -and $Category -eq 'timeout' -and -not $Stage)
-            )
+            $matched = Test-StartupFailure -Snapshot $snapshot -Name $Name -Stage $Stage -Category $Category
             if (-not $snapshot.Running) {
                 if ($snapshot.ExitCode -eq 0 -or -not $matched) {
                     throw 'Startup failure was not a nonzero exit with the expected safe category/stage.'
@@ -284,7 +297,11 @@ function Test-Rejection {
     Stop-Receiver
     $final = Get-Snapshot $id
     if ($final.Output.OutputCount -ne 0) { throw 'Telemetry appeared during negative-case shutdown.' }
-    $results.Add(@{ Case = $Name; Outcome = 'PASS'; Output = $final.Output; ExitCode = $snapshot.ExitCode })
+    $finalMatched = if ($Broker) { $final.Output.BrokerAuthentication } else {
+        $final.ExitCode -ne 0 -and (Test-StartupFailure -Snapshot $final -Name $Name -Stage $Stage -Category $Category)
+    }
+    if ($final.Running -or -not $finalMatched) { throw 'Final negative-case state or diagnostic did not preserve the accepted failure.' }
+    $results.Add(@{ Case = $Name; Outcome = 'PASS'; Output = $final.Output; ExitCode = $final.ExitCode })
     Write-Host "PASS: $Name - classified failure with no decoded records."
 }
 

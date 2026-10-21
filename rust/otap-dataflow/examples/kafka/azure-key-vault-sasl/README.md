@@ -322,6 +322,14 @@ variant `shared`, and the configured `1ms` deadline. A source acquisition
 timeout may also be observed, but is not required to win that race. Generic
 timeouts, another extension/deadline, OOM, and unknown errors never pass.
 
+Log collection, private scanning, and process inspection are separate operations.
+When inspection observes a terminal receiver, the harness recaptures and scans
+its logs once after that observation, then rechecks state. This prevents pairing
+pre-exit logs with a later nonzero exit while retaining bounded subprocesses.
+Disclosure and OOM checks apply to both captures; a restart is rejected. Final
+post-stop captures must still satisfy the original output/classification oracle
+and show a stopped receiver.
+
 For broker setup, a private helper container reads the same pair using Azure
 CLI, configures only the disposable broker's private JAAS volume, and holds a
 private reference for leak detection. The receiver cannot mount either that
@@ -362,6 +370,10 @@ Offline oracle checks, without Docker or Azure:
 python -B -m unittest discover -s scripts -p test_akv_runtime.py
 pwsh -NoProfile -File scripts/Test-CaseOracles.ps1
 ```
+
+The PowerShell fixtures exercise the actual driver functions, including exit
+during scanning, post-exit recapture, positive stop/final output, and strict
+negative lifecycle checks. They mock Docker operations and are not live evidence.
 
 Ignored `.runs\<project>` contains sanitized JSON only: exact source and
 SDK revisions, actual image IDs, extracted executable SHA-256, CLI version,

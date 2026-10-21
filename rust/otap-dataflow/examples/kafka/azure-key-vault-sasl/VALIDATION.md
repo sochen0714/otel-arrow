@@ -1,6 +1,6 @@
 # AKV receiver validation status
 
-**Status: production source integrated; live receiver E2E is pending.**
+**Status: two real cases confirmed; full receiver E2E remains pending.**
 
 This validation session initiated no Azure login and retrieved no
 secrets/tokens. The parent separately reported an operator-run system-assigned
@@ -139,8 +139,25 @@ source/engine timer race. An actual frozen engine image, with fake references
 and networking disabled, confirmed coordinated readiness failure and exit 1.
 This offline fixture is not a Key Vault or Kafka negative-case result.
 
-The corrected snapshot requires a new approved five-case run. The existing
-published `0110793` source, images, and checksums must remain immutable.
+The immutable `3986c5b` correction subsequently passed configured delivery and
+the missing-username case on the approved VM. The latter included actual
+username/not-found acquisition warnings, the exact 15-second readiness gate,
+nonzero terminal exit, zero records, and no detected disclosure.
+
+The run stopped during missing-password validation: its sanitized observation
+had password/not-found warnings, exit 1, zero records and no disclosure/OOM, but
+no readiness event. Logs had been read before a separate scan helper and a
+later process-state query. A deterministic fixture of the actual PowerShell
+functions reproduces this stale-log/terminal-state ordering; it is not a
+production failure or a reason to drop the readiness requirement. The runner
+now recaptures logs after observing exit and revalidates final stopped state,
+classification, and output. The same fixture passes after the correction.
+
+This second attempt completed only two of five required cases. Inner scoped
+cleanup succeeded, all reported Docker operations returned zero, and the
+actual outer operator exit was 1. Timeout and broker-rejection cases did not
+run. The next corrected snapshot requires its own provenance and approved run;
+published `0110793` and `3986c5b` sources, images, and checksums remain immutable.
 
 ## Live acceptance still required
 
@@ -150,13 +167,13 @@ published `0110793` source, images, and checksums must remain immutable.
 | Approved VM access and existing identity selection | Existing system-assigned identity approved; operator-assisted execution only |
 | Optional local development sign-in | Prerequisite-blocked by access policy; not a feature/data-plane failure |
 | Existing vault access model and Docker network reachability | CLI reference reads and configured receiver delivery succeeded |
-| Actual source build and executable/image provenance | Frozen initial snapshot built; corrected snapshot needs its own provenance |
-| Both real SDK reads, real capability binding, exact three output bodies | PASS in initial live attempt; rerun with corrected snapshot required |
-| Username/password missing-secret failures, no partial output | Missing-username harness failure; corrected negative cases NOT_RUN |
-| Bounded startup timeout and safe diagnostic classifications | NOT_RUN |
+| Actual source build and executable/image provenance | Published `3986c5b` provenance matched; next correction needs its own build |
+| Both real SDK reads, real capability binding, exact three output bodies | PASS in both actual attempts; repeat with next correction required |
+| Username/password missing-secret failures, no partial output | Username PASS; password classified exit 1 but readiness observation incomplete |
+| Bounded startup timeout and safe diagnostic classifications | Actual missing-reference classifications confirmed; intentional 1 ms case NOT_RUN |
 | Authorization failure against an explicitly approved denied target | NOT_RUN; optional target not supplied |
 | Broker-only wrong-password rejection, no output | NOT_RUN |
-| Receiver/broker credential-disclosure scans and scoped cleanup | Initial available scans clear and inner cleanup passed; outer exit 1; full corrected run pending |
+| Receiver/broker credential-disclosure scans and scoped cleanup | Available scans clear and inner cleanup passed; outer exit 1; full corrected run pending |
 
 The [README](README.md) contains exact future sign-in/run commands, runtime
 input shape, fixture restrictions, safe negative-case strategy, evidence
