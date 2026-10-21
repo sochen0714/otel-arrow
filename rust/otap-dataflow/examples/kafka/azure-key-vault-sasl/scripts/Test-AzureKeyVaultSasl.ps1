@@ -92,6 +92,7 @@ if ($IdentityMode -eq 'development') {
     $compose += @('-f', (Join-Path $example 'compose.development.yaml'))
 }
 $script:lastSnapshot = $null
+$script:lastContainer = $null
 $script:caseName = 'setup'
 $cleanupSucceeded = $false
 $allPassed = $false
@@ -204,7 +205,10 @@ function Start-Case {
     $null = Invoke-Compose -Arguments @('up', '-d', '--pull', 'never', '--no-deps', '--force-recreate', 'receiver') `
         -Action "start-$Name" -TimeoutSeconds 30
     $id = (Invoke-Compose -Arguments @('ps', '-aq', 'receiver') -Action 'receiver-id').Stdout.Trim()
-    if (-not $id) { throw 'Receiver container was not created.' }
+    if ($id -notmatch '^[0-9a-f]{64}$' -or $id -eq $script:lastContainer) {
+        throw 'Each case requires a newly created receiver container.'
+    }
+    $script:lastContainer = $id
     $id
 }
 
@@ -236,7 +240,7 @@ function Test-Delivery {
 }
 
 # Scenario: Acquisition fails before a complete pair, or the local broker rejects that pair.
-# Guarantees: Classified failure, zero decoded records, and nonzero startup exit for acquisition errors.
+# Guarantees: Scoped readiness failure, zero records, and a real nonzero acquisition exit.
 function Test-Rejection {
     param([string] $Name, [string] $Stage, [string] $Category, [switch] $Broker)
     $id = Start-Case $Name
@@ -253,9 +257,18 @@ function Test-Rejection {
             }
             if (-not $snapshot.Running) { throw 'Receiver exited without an explicit SASL rejection.' }
         } else {
-            $matched = @($snapshot.Output.StartupFailures | Where-Object {
+            $classified = @($snapshot.Output.StartupFailures | Where-Object {
                 $_.Category -eq $Category -and (-not $Stage -or $_.Stage -eq $Stage)
             }).Count -gt 0
+            $expectedTimeout = if ($Name -eq 'timeout') { '1ms' } else { '15s' }
+            $readinessFailed = @($snapshot.Output.ReadinessFailures | Where-Object {
+                $_.Extension -eq 'credentials' -and $_.Variant -eq 'shared' -and
+                $_.Timeout -eq $expectedTimeout
+            }).Count -gt 0
+            # At 1 ms the engine's readiness timer can win the acquisition timer.
+            $matched = $readinessFailed -and (
+                $classified -or ($Name -eq 'timeout' -and $Category -eq 'timeout' -and -not $Stage)
+            )
             if (-not $snapshot.Running) {
                 if ($snapshot.ExitCode -eq 0 -or -not $matched) {
                     throw 'Startup failure was not a nonzero exit with the expected safe category/stage.'

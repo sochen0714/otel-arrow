@@ -192,10 +192,22 @@ def summarize_logs(logs, expected, values):
     for value in values.values():
         candidates.extend((value, json.dumps(value, ensure_ascii=True)[1:-1], quote(value, safe="")))
     leaked = any(value and value in logs for value in candidates)
+    diagnostics = re.sub(r"\x1b\[[0-9;]*m", "", logs)
     failure_pattern = (
-        r"Azure Key Vault (identity|client|username|password|acquisition)"
-        r" acquisition failed \((authentication|authorization|not_found|throttled|transient|"
-        r"invalid_value|invalid_response|timeout|configuration|service)\)"
+        r"^\d{4}-\d{2}-\d{2}T\S+ +WARN +"
+        r"otel-arrow-dfe-contrib-extensions::"
+        r"azure_key_vault\.acquisition_failed(?: \([^)\r\n]+\))?:"
+        r" \[stage=(identity|client|username|password|acquisition), "
+        r"category=(authentication|authorization|not_found|throttled|transient|"
+        r"invalid_value|invalid_response|timeout|configuration|service)\]"
+    )
+    readiness_pattern = (
+        r"^\d{4}-\d{2}-\d{2}T\S+ +ERROR +"
+        r"otel\.controller\.main::"
+        r"otelcol\.pipeline\.recovery\.abort(?: \([^)\r\n]+\))?:"
+        r" [^\r\n]*\berror=runtime recovery is disabled: Pipeline runtime error: "
+        r"Extension `credentials` \(shared\) did not signal readiness within (1ms|15s); "
+        r"pipeline startup aborted on the readiness gate"
     )
     return {
         "LeakDetected": leaked,
@@ -205,7 +217,11 @@ def summarize_logs(logs, expected, values):
         and sorted(bodies) == sorted(expected),
         "StartupFailures": [
             {"Stage": stage, "Category": category}
-            for stage, category in re.findall(failure_pattern, logs)
+            for stage, category in re.findall(failure_pattern, diagnostics, re.MULTILINE)
+        ],
+        "ReadinessFailures": [
+            {"Extension": "credentials", "Variant": "shared", "Timeout": timeout}
+            for timeout in re.findall(readiness_pattern, diagnostics, re.MULTILINE)
         ],
         "BrokerAuthentication": bool(re.search(
             r"(?i)SASL authentication (error|failed)|Authentication failure|SaslAuthenticationFailed",

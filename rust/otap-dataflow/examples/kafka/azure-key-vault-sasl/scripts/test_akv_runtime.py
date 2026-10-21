@@ -25,6 +25,25 @@ CONFIG = {
 VALUES = {"username": "fixture_login_794", "password": 'fixture-password-"\\-794'}
 EXPECTED = ["fixture-record-1", "fixture-record-2", "fixture-record-3"]
 
+
+def failure_event(stage, category):
+    return (
+        "2026-10-20T12:00:00.000Z  WARN "
+        "otel-arrow-dfe-contrib-extensions::"
+        f"azure_key_vault.acquisition_failed: [stage={stage}, category={category}]"
+    )
+
+
+def readiness_event(timeout="1ms"):
+    return (
+        "2026-10-20T12:00:00.000Z ERROR "
+        "otel.controller.main::otelcol.pipeline.recovery.abort: "
+        "[pipeline_group_id=default, pipeline_id=validate, "
+        "error=runtime recovery is disabled: Pipeline runtime error: Extension `credentials` (shared) "
+        f"did not signal readiness within {timeout}; pipeline startup aborted on the readiness gate]"
+    )
+
+
 class ContainerizedDriverTests(unittest.TestCase):
     # Scenario: The containerized driver is invoked without the two runtime/identity releases.
     # Guarantees: It refuses before sudo, Docker, Git, input reads, or any identity operation.
@@ -351,16 +370,77 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(runtime.SafeFailure):
             runtime.summarize_logs('{"body":', EXPECTED, VALUES)
 
-    # Scenario: The provider emits its documented bounded stage/category error Display.
+    # Scenario: The provider emits its actual named warning with bounded unquoted attributes.
     # Guarantees: Missing-password cannot pass on an unrelated username, configuration, or process failure.
     def test_safe_startup_classification(self):
-        logs = "Azure Key Vault password acquisition failed (not_found)"
+        logs = failure_event("password", "not_found")
         summary = runtime.summarize_logs(logs, EXPECTED, VALUES)
         self.assertEqual(summary["StartupFailures"], [{"Stage": "password", "Category": "not_found"}])
         self.assertEqual(runtime.summarize_logs("404\nreceiver exited", EXPECTED, VALUES)["StartupFailures"], [])
         for category in ("authorization", "timeout", "authentication", "transient"):
-            logs = f"Azure Key Vault acquisition acquisition failed ({category})"
+            logs = failure_event("acquisition", category)
             self.assertEqual(runtime.summarize_logs(logs, EXPECTED, VALUES)["StartupFailures"][0]["Category"], category)
+
+    # Scenario: Formatter color and optional source locations surround an actual acquisition event.
+    # Guarantees: The event is recognized without stripping colors from the independent disclosure scan.
+    def test_colored_structured_warning(self):
+        logs = failure_event("username", "not_found").replace(
+            "azure_key_vault.acquisition_failed:",
+            "\x1b[1mazure_key_vault.acquisition_failed\x1b[0m (error.rs:113):",
+        )
+        self.assertEqual(runtime.summarize_logs(logs, EXPECTED, VALUES)["StartupFailures"],
+                         [{"Stage": "username", "Category": "not_found"}])
+
+    # Scenario: Display text, unrelated events, unknown labels, or exported bodies resemble failures.
+    # Guarantees: Only the source-grounded named warning can classify a startup acquisition error.
+    def test_untrusted_failure_shapes_rejected(self):
+        for logs in (
+            "Azure Key Vault username acquisition failed (not_found)",
+            failure_event("username", "not_found").replace("otel-arrow-dfe-contrib-extensions", "unrelated"),
+            failure_event("unknown", "not_found"),
+            failure_event("username", "unknown"),
+            failure_event("username", "not_found").replace("WARN", "INFO"),
+            json.dumps({"body": failure_event("username", "not_found")}),
+            failure_event("username", "not_found").replace(", category", "\n, category"),
+        ):
+            self.assertEqual(runtime.summarize_logs(logs, EXPECTED, VALUES)["StartupFailures"], [])
+
+    # Scenario: Readiness wins the same configured timer before source acquisition logs a timeout.
+    # Guarantees: Only the credentials/shared gate with its precise timeout is preserved as distinct evidence.
+    def test_scoped_readiness_timeout_race(self):
+        for timeout in ("1ms", "15s"):
+            result = runtime.summarize_logs(readiness_event(timeout), EXPECTED, VALUES)
+            self.assertEqual(result["StartupFailures"], [])
+            self.assertEqual(result["ReadinessFailures"],
+                             [{"Extension": "credentials", "Variant": "shared", "Timeout": timeout}])
+
+    # Scenario: Generic timeout text, another extension, or another event resembles a readiness failure.
+    # Guarantees: Unrelated timeouts cannot substitute for the expected AKV credentials readiness gate.
+    def test_unrelated_readiness_failures_rejected(self):
+        for logs in (
+            "timeout",
+            readiness_event("30s"),
+            readiness_event().replace("`credentials`", "`other`"),
+            readiness_event().replace("(shared)", "(local)"),
+            readiness_event().replace("otel.controller.main", "unrelated"),
+            readiness_event().replace("recovery.abort", "recovery.succeeded"),
+            readiness_event().replace("runtime recovery is disabled: ", ""),
+            json.dumps({"body": readiness_event()}),
+        ):
+            self.assertEqual(runtime.summarize_logs(logs, EXPECTED, VALUES)["ReadinessFailures"], [])
+
+    # Scenario: The controller uses its component-scoped target and emits a message before attributes.
+    # Guarantees: The actual fatal readiness format is classified without accepting an unrelated target.
+    def test_actual_controller_component_scope(self):
+        readiness = readiness_event().replace(": [", ": bounded failure message [")
+        result = runtime.summarize_logs(readiness, EXPECTED, VALUES)
+        self.assertEqual(result["ReadinessFailures"],
+                         [{"Extension": "credentials", "Variant": "shared", "Timeout": "1ms"}])
+
+    # Scenario: Validation runs on a controller whose default policy restarts failed pipelines.
+    # Guarantees: The fixture explicitly disables recovery so readiness failure retains its nonzero-exit oracle.
+    def test_fixture_disables_runtime_recovery(self):
+        self.assertIn("\npolicies:\n  runtime_recovery:\n    enabled: false\n", TEMPLATE)
 
     # Scenario: A live Kafka authentication error appears without decoded records.
     # Guarantees: Explicit SASL rejection is distinguishable from generic startup or network failure.

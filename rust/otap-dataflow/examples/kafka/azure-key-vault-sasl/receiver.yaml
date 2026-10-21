@@ -1,5 +1,8 @@
 # Rendered locally by akv_runtime.py; never put real resource details here.
 version: otel_dataflow/v1
+policies:
+  runtime_recovery:
+    enabled: false
 engine:
   telemetry:
     logs:

@@ -292,7 +292,7 @@ delivery. Each receiver case uses a new consumer group with earliest offsets.
 | Configured latest/pinned references | Exactly the three input bodies at the real console exporter |
 | Random absent username reference | Nonzero startup exit; stage `username`, category `not_found`; no records |
 | Random absent password reference | Nonzero startup exit; stage `password`, category `not_found`; no records |
-| 1 ms startup timeout | Nonzero startup exit; category `timeout`; no records |
+| 1 ms startup timeout | Nonzero startup exit; exact `credentials`/`shared` 1 ms readiness failure; no records |
 | Explicitly supplied denied vault | Nonzero startup exit; category `authorization`; no records, or `NOT_RUN` without a target |
 | Broker-only wrong password | Explicit Kafka SASL rejection and a further no-delivery observation window |
 
@@ -301,13 +301,26 @@ they never create/delete a secret. Password failure preserves the configured
 valid username reference, exercising failure after a possible first read
 without accepting partial telemetry. No fabricated readiness log is used:
 production readiness is an internal signal, not a public AKV success marker.
-Nonzero exit plus the precise bounded acquisition error and zero telemetry
-are the accessible startup-failure oracle, not direct instrumentation of that
-internal signal.
+The fixture explicitly sets `policies.runtime_recovery.enabled: false`.
+Otherwise the newer controller retries failed pipeline runtimes and keeps the
+process alive, so an unready pipeline is not an immediate process exit. With
+recovery disabled, a readiness failure requests coordinated engine shutdown.
+The harness still requires an actual nonzero terminal exit, not `ExitCode: 0`
+reported for a running container. Each case must have a new container ID.
 
-The provider's diagnostic is `Azure Key Vault {stage} acquisition failed
-({kind})`. The scanner recognizes only the documented stage/category
-allowlists, not a generic process failure or HTTP status alone.
+The provider emits the named warning `azure_key_vault.acquisition_failed`
+with bounded `stage` and `category` attributes, not its error's human-readable
+Display text. The scanner reads both process streams and matches the actual
+named-event formatter, including optional color/source-location formatting.
+Missing-reference cases require the exact expected stage/category, the
+`credentials`/`shared` 15-second readiness failure, and zero telemetry.
+
+For the intentional 1 ms case, the engine readiness timer and source
+acquisition timer can race. The required timeout evidence is the controller's
+fatal recovery-abort event identifying exactly extension `credentials`,
+variant `shared`, and the configured `1ms` deadline. A source acquisition
+timeout may also be observed, but is not required to win that race. Generic
+timeouts, another extension/deadline, OOM, and unknown errors never pass.
 
 For broker setup, a private helper container reads the same pair using Azure
 CLI, configures only the disposable broker's private JAAS volume, and holds a
@@ -342,6 +355,13 @@ shutdown, and cleanup have separate explicit bounds. Final log scans and
 shutdown can extend a case past its observation deadline. Provider startup
 normally has a 15-second bound, or 1 ms for the intentional timeout case.
 No case is silently skipped or treated as success on a process/OOM failure.
+
+Offline oracle checks, without Docker or Azure:
+
+```powershell
+python -B -m unittest discover -s scripts -p test_akv_runtime.py
+pwsh -NoProfile -File scripts/Test-CaseOracles.ps1
+```
 
 Ignored `.runs\<project>` contains sanitized JSON only: exact source and
 SDK revisions, actual image IDs, extracted executable SHA-256, CLI version,

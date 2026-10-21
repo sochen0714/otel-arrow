@@ -119,21 +119,44 @@ All 26 tests passed in the Linux test image. These are offline tests, not
 managed-identity, Key Vault, Kafka, or receiver acceptance. The Windows run
 passes 24 runtime tests and explicitly skips the two Linux-only wrapper tests.
 
+## Initial live attempt and corrected harness
+
+The immutable `0110793` validation snapshot reached the real SDK, capability
+binding, Kafka receiver, and console exporter: the configured case delivered
+exactly the three controlled bodies. The run stopped on the first missing
+username-reference case, completing only one of five required cases. Its
+sanitized summary reported zero negative-case records, no detected disclosure,
+inner cleanup success, and a still-running receiver. The outer operator exit
+was 1. This is partial evidence, not full feature acceptance.
+
+The harness had matched human-readable error Display text instead of the
+actual named acquisition warning. It also inherited newer-main's default
+pipeline recovery, which restarts failed runtimes rather than immediately
+exiting. The corrected validation config disables recovery without changing
+production code, preserving the nonzero terminal-exit oracle. It additionally
+checks the exact readiness gate and handles the specifically scoped 1 ms
+source/engine timer race. An actual frozen engine image, with fake references
+and networking disabled, confirmed coordinated readiness failure and exit 1.
+This offline fixture is not a Key Vault or Kafka negative-case result.
+
+The corrected snapshot requires a new approved five-case run. The existing
+published `0110793` source, images, and checksums must remain immutable.
+
 ## Live acceptance still required
 
 | Acceptance | Current result |
 | --- | --- |
 | Final SDK/source handoff integrated and clean source committed | Integrated net diff; see Git revision and build provenance |
-| Approved VM access and existing identity selection | Pending private target/access/identity handoff; no remote execution authorized |
+| Approved VM access and existing identity selection | Existing system-assigned identity approved; operator-assisted execution only |
 | Optional local development sign-in | Prerequisite-blocked by access policy; not a feature/data-plane failure |
-| Existing vault access model and Docker network reachability | Unverified |
-| Actual source build and executable/image provenance | Separate build preparation; requires successful build artifact |
-| Both real SDK reads, real capability binding, exact three output bodies | NOT_RUN |
-| Username/password missing-secret failures, no partial output | NOT_RUN |
+| Existing vault access model and Docker network reachability | CLI reference reads and configured receiver delivery succeeded |
+| Actual source build and executable/image provenance | Frozen initial snapshot built; corrected snapshot needs its own provenance |
+| Both real SDK reads, real capability binding, exact three output bodies | PASS in initial live attempt; rerun with corrected snapshot required |
+| Username/password missing-secret failures, no partial output | Missing-username harness failure; corrected negative cases NOT_RUN |
 | Bounded startup timeout and safe diagnostic classifications | NOT_RUN |
 | Authorization failure against an explicitly approved denied target | NOT_RUN; optional target not supplied |
 | Broker-only wrong-password rejection, no output | NOT_RUN |
-| Receiver/broker credential-disclosure scans and scoped cleanup | NOT_RUN |
+| Receiver/broker credential-disclosure scans and scoped cleanup | Initial available scans clear and inner cleanup passed; outer exit 1; full corrected run pending |
 
 The [README](README.md) contains exact future sign-in/run commands, runtime
 input shape, fixture restrictions, safe negative-case strategy, evidence
