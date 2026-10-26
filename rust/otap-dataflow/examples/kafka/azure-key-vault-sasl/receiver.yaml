@@ -1,0 +1,48 @@
+# Rendered locally by akv_runtime.py; never put real resource details here.
+version: otel_dataflow/v1
+policies:
+  runtime_recovery:
+    enabled: false
+engine:
+  telemetry:
+    logs:
+      level: info
+groups:
+  default:
+    pipelines:
+      validate:
+        extensions:
+          credentials:
+            type: urn:otel:extension:azure_key_vault_sasl_auth
+            config:
+              vault_url: __VAULT_URL_JSON__
+              username_secret: __USERNAME_SECRET_JSON__
+              password_secret: __PASSWORD_SECRET_JSON__
+              identity: __IDENTITY_JSON__
+              startup_timeout: __STARTUP_TIMEOUT_JSON__
+        nodes:
+          kafka:
+            type: urn:otel:receiver:kafka
+            capabilities:
+              sasl_credential_provider: credentials
+            config:
+              brokers: kafka:9093
+              group_id: ${env:KAFKA_GROUP_ID}
+              client_id: ${env:KAFKA_GROUP_ID}
+              auto_offset_reset: earliest
+              auth:
+                sasl:
+                  mechanism: PLAIN
+                  credential_source: capability
+              tls:
+                ca_file: /certs/ca.crt
+              logs:
+                topics: [akv-sasl-logs]
+                encoding: plaintext
+          output:
+            type: urn:otel:exporter:console
+            config:
+              format: record_json
+        connections:
+          - from: kafka
+            to: output

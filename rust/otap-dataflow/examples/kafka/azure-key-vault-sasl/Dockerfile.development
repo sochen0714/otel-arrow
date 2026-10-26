@@ -1,0 +1,34 @@
+# Development/test only. Never use this Azure CLI/root image in production.
+ARG ENGINE_IMAGE
+ARG AZURE_CLI_IMAGE=mcr.microsoft.com/azure-cli@sha256:933eb8dcb81aecb6f77e03c5b8660f0a1dfa9e1d16525763a27f86ff3b83a044
+FROM ${ENGINE_IMAGE} AS engine
+FROM ${AZURE_CLI_IMAGE} AS azure-cli
+FROM debian:trixie-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libstdc++6 python3 \
+        libcrypt1 libgdbm6t64 libgdbm-compat4t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep Debian's newer glibc for df_engine; copy only the unmodified official CLI
+# and its Python runtime, never Azure Linux's libc/OpenSSL or a credential cache.
+COPY --from=azure-cli /usr/bin/az /usr/bin/az
+COPY --from=azure-cli /usr/bin/python3.12 /usr/bin/python3.12
+COPY --from=azure-cli /usr/lib/python3.12 /usr/lib/python3.12
+COPY --from=azure-cli /usr/lib64/libpython3.12.so.1.0 /usr/local/lib/libpython3.12.so.1.0
+COPY --from=azure-cli /usr/lib64/az /usr/lib64/az
+RUN ldconfig
+
+ENV AZURE_CONFIG_DIR=/root/.azure \
+    AZURE_CORE_COLLECT_TELEMETRY=no \
+    AZURE_CORE_ONLY_SHOW_ERRORS=true \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN --network=none az version --output json \
+    && PYTHONPATH=/usr/lib64/az/lib/python3.12/site-packages \
+       python3.12 -c "import ssl, ctypes; import azure.cli.command_modules.profile; import azure.cli.command_modules.keyvault"
+
+COPY --from=engine /home/nonroot/df_engine /home/nonroot/df_engine
+COPY scripts/akv_runtime.py /validation/akv_runtime.py
+COPY receiver.yaml /validation/receiver.template.yaml
+ENTRYPOINT ["/home/nonroot/df_engine"]

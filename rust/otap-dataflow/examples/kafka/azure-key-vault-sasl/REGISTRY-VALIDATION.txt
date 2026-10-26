@@ -1,0 +1,19 @@
+Current production source: da8412df9721ecf3c4a365c464ba120131ddb2d8 (PR #4501).
+Harness source: 92c43e96cba049d018d55f5446d677f1cc66d00e.
+
+This isolated validation snapshot adds the prior accepted receiver harness to
+the exact current PR source. Production Rust and Cargo files are unchanged.
+The driver now requires the published registry packages azure_core
+1.2.0-beta.1, azure_identity 1.1.0-beta.1, and azure_security_keyvault_secrets
+1.1.0-beta.1. It records registry package provenance instead of an SDK Git pin.
+The five live case oracles and scoped cleanup remain unchanged.
+
+README.md and VALIDATION.md are retained historical harness documentation.
+Their old production/SDK references and live results do not validate this
+snapshot. This snapshot has NOT_RUN live status until its own full matrix,
+outer exit, sanitized evidence, and cleanup have been verified.
+
+Execution uses the previously approved Linux VM, its system-assigned managed
+identity, and operator-run sudo Docker with containerized tools. It does not
+modify Azure resources, identity permissions, secrets, firewall rules, or host
+tools. Do not substitute the former Git-SDK images for these new builds.
