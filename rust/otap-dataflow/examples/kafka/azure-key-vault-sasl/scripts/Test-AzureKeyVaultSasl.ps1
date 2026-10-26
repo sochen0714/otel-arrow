@@ -52,10 +52,11 @@ function Get-PublishedSdk {
     }
     $records = [regex]::Split($Lock, '(?m)^\[\[package\]\]\r?$')
     foreach ($name in $expected.Keys) {
-        $matching = @($records | Where-Object { $_ -match "(?m)^name = `"$name`"`r?$" })
         $version = [regex]::Escape($expected[$name])
+        $matching = @($records | Where-Object {
+            $_ -match "(?m)^name = `"$name`"`r?$" -and $_ -match "(?m)^version = `"$version`"`r?$"
+        })
         if ($matching.Count -ne 1 -or
-            $matching[0] -notmatch "(?m)^version = `"$version`"`r?$" -or
             $matching[0] -notmatch '(?m)^source = "registry\+https://github\.com/rust-lang/crates\.io-index"\r?$') {
             throw 'Published Azure SDK provenance mismatch.'
         }

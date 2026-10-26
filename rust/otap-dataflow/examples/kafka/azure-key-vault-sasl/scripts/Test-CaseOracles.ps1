@@ -20,8 +20,8 @@ foreach ($name in @('Test-Rejection', 'Start-Case', 'Get-Snapshot', 'Test-Delive
 . ([scriptblock]::Create($TestStartupFailureDefinition))
 . ([scriptblock]::Create($GetPublishedSdkDefinition))
 
-# Scenario: Registry versions, source identities, missing entries, or duplicate SDK packages differ.
-# Guarantees: Only one coherent published beta.1 family is accepted as current E2E provenance.
+# Scenario: The selected SDK family differs, or unrelated older SDK packages coexist.
+# Guarantees: Published beta.1 records are required without rejecting unrelated registry versions.
 function Test-PublishedSdk {
     $lock = @'
 [[package]]
@@ -37,8 +37,12 @@ name = "azure_security_keyvault_secrets"
 version = "1.1.0-beta.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 '@
-    foreach ($candidate in @(
+    $valid = @(
         $lock,
+        $lock.Replace("`n", "`r`n"),
+        ($lock + "`n[[package]]`nname = `"azure_core`"`nversion = `"0.29.1`"`nsource = `"registry+https://github.com/rust-lang/crates.io-index`"")
+    )
+    foreach ($candidate in @($valid) + @(
         ($lock -replace 'registry\+https://github.com/rust-lang/crates.io-index', 'git+https://example.invalid/sdk'),
         ($lock -replace '1.2.0-beta.1', '1.2.0-beta.2'),
         ($lock -replace 'name = "azure_identity"', 'name = "not_azure_identity"'),
@@ -54,8 +58,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             if ($_.Exception.Message -ne 'Published Azure SDK provenance mismatch.') { throw }
             $accepted = $false
         }
-        if ($accepted -ne ($candidate -eq $lock)) { throw 'SDK provenance fixture accepted the wrong input.' }
+        if ($accepted -ne ($candidate -in $valid)) { throw 'SDK provenance fixture accepted the wrong input.' }
     }
+    $repo = (Resolve-Path (Join-Path $PSScriptRoot '..' '..' '..' '..' '..' '..')).Path
+    $actualLock = Get-Content -Raw (Join-Path $repo 'rust' 'otap-dataflow' 'Cargo.lock')
+    $null = Get-PublishedSdk -Lock $actualLock
 }
 Test-PublishedSdk
 function Start-Case { param($Name) 'fixture-container' }
@@ -277,4 +284,4 @@ Test-SnapshotLifecycle broker $true
 Test-SnapshotLifecycle broker-final-output $false
 Test-SnapshotLifecycle broker-final-classification $false
 Test-SnapshotLifecycle broker-final-running $false
-[Console]::WriteLine('POWERSHELL_CASE_ORACLES_OK: 44 offline scenarios; not live acceptance.')
+[Console]::WriteLine('POWERSHELL_CASE_ORACLES_OK: 47 offline scenarios; not live acceptance.')
