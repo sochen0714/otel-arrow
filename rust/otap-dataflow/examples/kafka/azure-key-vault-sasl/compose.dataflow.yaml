@@ -1,0 +1,29 @@
+services:
+  receiver:
+    image: ${AKV_IMAGE:?}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      AZURE_CONFIG_DIR: /root/.azure
+      AZURE_CORE_COLLECT_TELEMETRY: "no"
+      AZURE_CORE_ONLY_SHOW_ERRORS: "true"
+      KAFKA_GROUP_ID: ${AKV_GROUP:?}
+      NO_PROXY: 169.254.169.254,127.0.0.1,localhost,kafka
+      no_proxy: 169.254.169.254,127.0.0.1,localhost,kafka
+    volumes:
+      - ${AKV_RUN_DIR:?}/runtime:/runtime:ro
+      - certificates:/certs:ro
+    mem_limit: 512m
+    cpus: 1
+    command:
+      - --config
+      - file:/runtime/receiver.yaml
+      - --num-cores
+      - "1"
+      - --http-admin-bind
+      - 127.0.0.1:8080
+    logging:
+      options:
+        max-size: 10m
+        max-file: "2"

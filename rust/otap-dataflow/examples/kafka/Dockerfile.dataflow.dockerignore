@@ -1,0 +1,12 @@
+# Dockerfile-specific rules replace the context-root .dockerignore.
+target/*
+!target/release/
+target/release/*
+!target/release/df_engine.exe
+docs
+configs
+
+**/.local
+**/.runs
+**/.azure
+**/__pycache__

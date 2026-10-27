@@ -1,0 +1,8 @@
+.gitattributes text eol=lf
+/Dockerfile.dataflow text eol=lf
+/Dockerfile.dataflow.dockerignore text eol=lf
+*.sh text eol=lf
+/README.md text eol=lf
+sasl-tls/compose.yaml text eol=lf
+flat-file-sasl/** text eol=lf
+azure-key-vault-sasl/** text eol=lf

@@ -1,0 +1,142 @@
+{
+  "SourceCommit": "ced089ecbd8d8977ede6d9b0b170a5db5013d955",
+  "ProductionCommit": "da8412df9721ecf3c4a365c464ba120131ddb2d8",
+  "StartedAt": "2026-10-27T05:12:56.1260148+00:00",
+  "CompletedAt": "2026-10-27T05:15:13.1786074+00:00",
+  "SdkSource": "registry+https://github.com/rust-lang/crates.io-index",
+  "SdkPackages": {
+    "azure_core": "1.2.0-beta.1",
+    "azure_identity": "1.1.0-beta.1",
+    "azure_security_keyvault_secrets": "1.1.0-beta.1"
+  },
+  "RequiredCases": 5,
+  "PassedCases": 5,
+  "ConfiguredExactRecordCount": 3,
+  "OuterOperatorExit": 0,
+  "SshExit": 0,
+  "EveryReceiverStopped": true,
+  "NoOomOrDisclosure": true,
+  "ScopedCleanupVerified": true,
+  "RecordedActions": 198,
+  "AllRecordedActionsExitedZero": true,
+  "OptionalDeniedVaultAuthorization": "NOT_RUN",
+  "SchemaVersion": 1,
+  "Scope": "Recorded published-SDK run only; not live acceptance of subsequent fork commits.",
+  "Identity": "system_assigned_managed_identity",
+  "Image": {
+    "Image": "otap-akv-e2e-development:ced089ecbd8d",
+    "ImageId": "sha256:8e4e912b8413d8a87c531bfbe6c6b691374365c53793489fc2808f5456d788c7",
+    "ExecutableSha256": "4f06174009b0dd9d6e17d907cfa9184e83b89ba989a65b60e4c5fe3b9e83dafc",
+    "Features": "kafka,azure-key-vault-sasl-auth",
+    "Mechanism": "PLAIN",
+    "Transport": "SASL_SSL",
+    "Encoding": "plaintext",
+    "AzureCliVersion": "2.91.0"
+  },
+  "Results": [
+    {
+      "Case": "configured",
+      "Outcome": "PASS",
+      "Output": {
+        "LeakDetected": false,
+        "OutputCount": 3,
+        "ExactBodies": true,
+        "StartupFailures": [],
+        "ReadinessFailures": [],
+        "BrokerAuthentication": false
+      }
+    },
+    {
+      "Case": "missing-username",
+      "Outcome": "PASS",
+      "Output": {
+        "LeakDetected": false,
+        "OutputCount": 0,
+        "ExactBodies": false,
+        "StartupFailures": [
+          {
+            "Stage": "username",
+            "Category": "not_found"
+          },
+          {
+            "Stage": "username",
+            "Category": "not_found"
+          }
+        ],
+        "ReadinessFailures": [
+          {
+            "Extension": "credentials",
+            "Variant": "shared",
+            "Timeout": "15s"
+          }
+        ],
+        "BrokerAuthentication": false
+      },
+      "ExitCode": 1
+    },
+    {
+      "Case": "missing-password",
+      "Outcome": "PASS",
+      "Output": {
+        "LeakDetected": false,
+        "OutputCount": 0,
+        "ExactBodies": false,
+        "StartupFailures": [
+          {
+            "Stage": "password",
+            "Category": "not_found"
+          },
+          {
+            "Stage": "password",
+            "Category": "not_found"
+          }
+        ],
+        "ReadinessFailures": [
+          {
+            "Extension": "credentials",
+            "Variant": "shared",
+            "Timeout": "15s"
+          }
+        ],
+        "BrokerAuthentication": false
+      },
+      "ExitCode": 1
+    },
+    {
+      "Case": "timeout",
+      "Outcome": "PASS",
+      "Output": {
+        "LeakDetected": false,
+        "OutputCount": 0,
+        "ExactBodies": false,
+        "StartupFailures": [],
+        "ReadinessFailures": [
+          {
+            "Extension": "credentials",
+            "Variant": "shared",
+            "Timeout": "1ms"
+          }
+        ],
+        "BrokerAuthentication": false
+      },
+      "ExitCode": 1
+    },
+    {
+      "Case": "authorization",
+      "Outcome": "NOT_RUN"
+    },
+    {
+      "Case": "broker-rejection",
+      "Outcome": "PASS",
+      "Output": {
+        "LeakDetected": false,
+        "OutputCount": 0,
+        "ExactBodies": false,
+        "StartupFailures": [],
+        "ReadinessFailures": [],
+        "BrokerAuthentication": true
+      },
+      "ExitCode": 0
+    }
+  ]
+}
